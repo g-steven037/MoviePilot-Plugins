@@ -31,12 +31,14 @@ DEFAULT_LIBRARY_MAP = """动画电影|动画电影|ANIME\\nMOVIE
 纪录片|纪录片|DOCUMENTARY
 精选合集|精选合集|CURATED\\nCOLLECTION"""
 
+EMBEDDED_FONT_NAME = "NotoSansSC-Variable.ttf"
+
 
 class EmbyLibraryCover(_PluginBase):
     plugin_name = "Emby媒体库封面"
     plugin_desc = "根据Emby最新媒体海报生成横版媒体库封面，可按Cron定时生成并选择性上传覆盖，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/emby-library-cover.svg"
-    plugin_version = "0.1.5"
+    plugin_version = "0.1.6"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "embylibrarycover_"
@@ -79,8 +81,9 @@ class EmbyLibraryCover(_PluginBase):
                 raise ValueError("STYLE_INVALID")
             timeout = self._bounded_int(config.get("timeout", 30), 5, 120)
             self._output_dir = self._prepare_output_dir(config.get("output_dir", ""))
-            font_zh = self._prepare_font(config.get("font_zh_path", ""))
-            font_en = self._prepare_font(config.get("font_en_path", ""))
+            embedded_font = self._embedded_font_path()
+            font_zh = self._prepare_font(config.get("font_zh_path", "")) or embedded_font
+            font_en = self._prepare_font(config.get("font_en_path", "")) or embedded_font
             render_config = self._build_render_config(config, font_zh, font_en)
             self._output_format = render_config["output_format"]
             self._upload_enabled = bool(config.get("upload_enabled", False))
@@ -358,6 +361,21 @@ class EmbyLibraryCover(_PluginBase):
         return str(resolved)
 
     @staticmethod
+    def _embedded_font_path() -> str:
+        """Return only the regular font file shipped inside this plugin."""
+        font_dir = (Path(__file__).resolve().parent / "fonts").resolve()
+        candidate = font_dir / EMBEDDED_FONT_NAME
+        if candidate.is_symlink():
+            return ""
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return ""
+        if resolved.parent != font_dir or not resolved.is_file():
+            return ""
+        return str(resolved)
+
+    @staticmethod
     def _safe_filename(name: str, library_id: str) -> str:
         safe = re.sub(r'[^\w\-.\u4e00-\u9fff]+', "_", name, flags=re.UNICODE).strip("_.")[:100]
         suffix = re.sub(r"[^A-Za-z0-9]", "", library_id)[:12]
@@ -514,8 +532,8 @@ class EmbyLibraryCover(_PluginBase):
             ("schedule_time", "每日运行时间（HH:MM，填写后优先于Cron）", "text"),
             ("update_interval_hours", "循环间隔小时（0或0.25-168）", "number"),
             ("output_dir", "输出目录（留空使用MoviePilot配置目录）", "text"),
-            ("font_zh_path", "中文字体绝对路径（可留空）", "text"),
-            ("font_en_path", "英文字体绝对路径（可留空）", "text"),
+            ("font_zh_path", "中文字体绝对路径（留空使用内置Noto Sans SC）", "text"),
+            ("font_en_path", "英文字体绝对路径（留空使用内置Noto Sans SC）", "text"),
             ("timeout", "请求超时秒数（5-120）", "number"),
             ("output_width", "输出宽度（640-3840）", "number"),
             ("output_height", "输出高度（360-2160）", "number"),
