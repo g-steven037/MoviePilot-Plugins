@@ -56,7 +56,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "安全监控硬链接目录，未命中秒传时原子移入临时目录并限速重试"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "0.3.1"
+    plugin_version = "0.4.2"
     plugin_author = "115-transmission"
     author_url = "https://github.com"
     plugin_config_prefix = "p115rapidretry_"
@@ -321,6 +321,7 @@ class P115RapidRetry(_PluginBase):
             )
         identity = result.identity or identity
         self._record(task_id, result.success, result.code)
+        self._audit_rapid(path, root, result, from_retry)
 
         if result.code == "AUTH_FAILED":
             self._auth_blocked = True
@@ -436,6 +437,32 @@ class P115RapidRetry(_PluginBase):
         self.save_data("history", history[:200])
 
     @staticmethod
+    def _safe_log_value(value: Any, limit: int = 1024) -> str:
+        text = "".join(char if ord(char) >= 0x20 and ord(char) != 0x7F else "?" for char in str(value))
+        return text[:limit]
+
+    def _audit_rapid(self, path: Path, root: Path, result: RapidResult, from_retry: bool):
+        if result.success:
+            status, matched = "成功", "是"
+        elif result.code == "RAPID_MISS":
+            status, matched = "未命中", "否"
+        else:
+            status, matched = "失败", "未知"
+        logger.info(
+            "115秒传审计 | 时间=%s | 来源=%s | 文件夹=%s | 文件名=%s | SHA1=%s | SHA1服务端匹配=%s | 秒传=%s | 代码=%s"
+            % (
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "定时重试" if from_retry else "实时监控",
+                self._safe_log_value(path.parent),
+                self._safe_log_value(path.name),
+                result.sha1 or "未计算",
+                matched,
+                status,
+                self._normalize_code(result.code),
+            )
+        )
+
+    @staticmethod
     def _remove_empty_dirs(root: Path):
         try:
             directories = (path for path in root.rglob("*") if path.is_dir() and not path.is_symlink())
@@ -459,7 +486,9 @@ class P115RapidRetry(_PluginBase):
             ("max_batch", "每轮最大重试文件数（1-100）", "number"),
         ]
         content = [{"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "text": "Cookie 仅用于登录115官方接口，不发送给其他第三方，不写入插件日志或历史；MoviePilot 会将其保存在自身配置中，请保护管理端和数据目录。"}}]}]}]
-        content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "启用严格安全模式"}}]}]})
+        content.append({"component": "VRow", "content": [
+            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "插件启用"}}]},
+        ]})
         for model, label, field_type in fields:
             props = {"model": model, "label": label, "clearable": False}
             if field_type:

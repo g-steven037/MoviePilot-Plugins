@@ -31,6 +31,7 @@ class RapidResult:
     retryable: bool
     code: str
     identity: FileIdentity | None = None
+    sha1: str | None = None
 
 
 def _is_reparse_point(value: os.stat_result) -> bool:
@@ -167,8 +168,8 @@ def try_rapid_upload(
         return RapidResult(False, True, _safe_exception_code(exc))
 
     if not isinstance(response, dict):
-        return RapidResult(False, True, "INVALID_RESPONSE", identity)
+        return RapidResult(False, True, "INVALID_RESPONSE", identity, full_sha1)
     if response.get("state") and response.get("reuse"):
-        return RapidResult(True, False, "RAPID_SUCCESS", identity)
+        return RapidResult(True, False, "RAPID_SUCCESS", identity, full_sha1)
     code, retryable = _safe_response_code(response)
-    return RapidResult(False, retryable, code, identity)
+    return RapidResult(False, retryable, code, identity, full_sha1)
