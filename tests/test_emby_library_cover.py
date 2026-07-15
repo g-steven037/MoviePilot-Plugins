@@ -15,10 +15,12 @@ from embylibrarycover import (
     EmbyLibraryCover,
 )
 from embylibrarycover.client import EmbyClient, EmbyError, validate_base_url
-from embylibrarycover.renderer import CoverRenderer, DEFAULT_RENDER_CONFIG
+from embylibrarycover.renderer import (
+    CoverRenderer, DEFAULT_RENDER_CONFIG, _english_title_position, _multiline,
+)
 from app.core.config import settings
 from fontTools.ttLib import TTFont
-from PIL import Image, ImageFont
+from PIL import Image, ImageDraw, ImageFont
 
 
 class FakeResponse:
@@ -102,6 +104,7 @@ def test_form_defaults_to_generation_only_and_password_field():
         "s1_snow_density", "s1_overlay_alpha", "s2_poster_rotation",
         "s2_accent_bar_color", "output_width", "cron",
         "s1_en_letter_spacing", "s2_en_letter_spacing",
+        "s1_title_gap", "s2_title_gap",
     ):
         assert f"'model': '{model}'" in serialized
     for removed in (
@@ -119,6 +122,27 @@ def test_form_defaults_to_generation_only_and_password_field():
     assert "'show': '{{upload_enabled}}'" in serialized
     assert defaults["s1_en_letter_spacing"] == 10
     assert defaults["s2_en_letter_spacing"] == 6
+    assert defaults["s1_title_gap"] == 20
+    assert defaults["s2_title_gap"] == 24
+
+
+def test_title_gap_and_english_letter_spacing_affect_pixels():
+    font = ImageFont.load_default(size=40)
+
+    def rendered_width(letter_spacing: int) -> int:
+        image = Image.new("L", (800, 160), 0)
+        draw = ImageDraw.Draw(image)
+        _multiline(draw, (10, 10), "MOVIES", font, 255, 0, letter_spacing)
+        box = image.getbbox()
+        assert box is not None
+        return box[2] - box[0]
+
+    assert rendered_width(20) > rendered_width(0) + 80
+    image = Image.new("L", (800, 300), 0)
+    draw = ImageDraw.Draw(image)
+    first = _english_title_position(draw, (10, 10), 20, "中文", font, 10)
+    second = _english_title_position(draw, (10, 10), 20, "中文", font, 70)
+    assert second[1] - first[1] == 60
 
 
 def test_moviepilot_emby_config_is_resolved_without_copying_secrets():
@@ -224,7 +248,8 @@ def test_visual_config_is_validated_and_applied():
     migrated = EmbyLibraryCover._build_render_config({
         "s1_text_pos_zh_x": 999, "s1_text_pos_en_y": 999,
         "s1_en_letter_spacing": 99, "s1_poster_width": 999,
-        "s2_text_pos_x": 999, "s2_en_letter_spacing": 88,
+        "s1_title_gap": 45, "s2_text_pos_x": 999, "s2_en_letter_spacing": 88,
+        "s2_title_gap": 55,
         "s2_poster_height": 999, "s1_background_blur_enable": True,
         "s1_bottom_gradient_enable": False, "s1_snow_enable": False,
         "s2_accent_bar_enable": False, "s2_bg_auto_color": False,
@@ -239,12 +264,15 @@ def test_visual_config_is_validated_and_applied():
         assert migrated[key] == DEFAULT_RENDER_CONFIG[key]
     assert migrated["s1_en_letter_spacing"] == 99
     assert migrated["s2_en_letter_spacing"] == 88
+    assert migrated["s1_title_gap"] == 45
+    assert migrated["s2_title_gap"] == 55
     for unsafe in (
         {"output_width": 99999},
         {"s1_snow_radius_min": 9, "s1_snow_radius_max": 8},
         {"s2_accent_bar_color": "orange"},
         {"s1_en_letter_spacing": 101},
         {"s2_en_letter_spacing": -1},
+        {"s1_title_gap": 501},
     ):
         try:
             EmbyLibraryCover._build_render_config(unsafe, "", "")

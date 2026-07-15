@@ -13,7 +13,7 @@ DEFAULT_RENDER_CONFIG: dict[str, Any] = {
     "output_format": "jpg", "jpeg_quality": 92,
     "s1_text_pos_zh": (100, 100), "s1_text_pos_en": (110, 260),
     "s1_font_size_zh": 150, "s1_font_size_en": 70,
-    "s1_en_letter_spacing": 10, "s1_en_line_spacing": 12,
+    "s1_title_gap": 20, "s1_en_letter_spacing": 10, "s1_en_line_spacing": 12,
     "s1_poster_count": 6, "s1_poster_size": (280, 420),
     "s1_poster_spacing": 20, "s1_poster_y_pos": 610,
     "s1_background_blur_enable": False, "s1_blur_percent": 0,
@@ -28,7 +28,7 @@ DEFAULT_RENDER_CONFIG: dict[str, Any] = {
     "s2_poster_stagger": 180, "s2_poster_rotation": -15,
     "s2_poster_center": (1600, 540), "s2_text_pos": (100, 390),
     "s2_font_size_zh": 180, "s2_font_size_en": 50,
-    "s2_en_letter_spacing": 6, "s2_en_line_spacing": 12,
+    "s2_title_gap": 24, "s2_en_letter_spacing": 6, "s2_en_line_spacing": 12,
     "s2_accent_bar_enable": True, "s2_accent_bar_color": (255, 140, 0),
     "s2_bg_auto_color": True, "s2_bg_default_color": (30, 30, 35),
 }
@@ -72,6 +72,11 @@ def _multiline(draw, xy, text: str, font, fill, spacing: int, letter_spacing: in
             cursor += draw.textlength(char, font=font) + letter_spacing
         box = draw.textbbox((x, y), line or " ", font=font)
         y += box[3] - box[1] + spacing
+
+
+def _english_title_position(draw, zh_xy, en_x: int, zh_text: str, zh_font, title_gap: int) -> tuple[int, int]:
+    box = draw.textbbox(zh_xy, zh_text or " ", font=zh_font)
+    return int(en_x), int(box[3] + title_gap)
 
 
 class CoverRenderer:
@@ -124,8 +129,12 @@ class CoverRenderer:
             self._snow(canvas)
         draw = ImageDraw.Draw(canvas)
         zh_font, en_font = self._fonts(c["s1_font_size_zh"], c["s1_font_size_en"])
-        draw.text(c["s1_text_pos_zh"], title["zh"], font=zh_font, fill=(255, 255, 255, 245))
-        _multiline(draw, c["s1_text_pos_en"], title["en"], en_font, (255, 255, 255, 238), c["s1_en_line_spacing"], c["s1_en_letter_spacing"])
+        zh_xy = c["s1_text_pos_zh"]
+        draw.text(zh_xy, title["zh"], font=zh_font, fill=(255, 255, 255, 245))
+        en_xy = _english_title_position(
+            draw, zh_xy, c["s1_text_pos_en"][0], title["zh"], zh_font, c["s1_title_gap"]
+        )
+        _multiline(draw, en_xy, title["en"], en_font, (255, 255, 255, 238), c["s1_en_line_spacing"], c["s1_en_letter_spacing"])
         size = tuple(c["s1_poster_size"])
         selected = posters[:c["s1_poster_count"]]
         width = len(selected) * size[0] + max(0, len(selected) - 1) * c["s1_poster_spacing"]
@@ -150,8 +159,7 @@ class CoverRenderer:
         zh_font, en_font = self._fonts(c["s2_font_size_zh"], c["s2_font_size_en"])
         x, y = c["s2_text_pos"]
         draw.text((x, y), title["zh"], font=zh_font, fill=(255, 255, 255, 245))
-        box = draw.textbbox((x, y), title["zh"], font=zh_font)
-        en_y = box[3] + 24
+        _, en_y = _english_title_position(draw, (x, y), x, title["zh"], zh_font, c["s2_title_gap"])
         if c["s2_accent_bar_enable"]:
             draw.rounded_rectangle((x, en_y + 4, x + 10, en_y + 110), radius=5, fill=tuple(c["s2_accent_bar_color"]) + (255,))
             x += 28

@@ -54,7 +54,7 @@ class EmbyLibraryCover(_PluginBase):
     plugin_name = "Emby媒体库封面"
     plugin_desc = "根据Emby最新媒体海报生成横版媒体库封面，可按Cron定时生成并选择性上传覆盖，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/emby-library-cover.svg"
-    plugin_version = "0.1.10"
+    plugin_version = "0.1.11"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "embylibrarycover_"
@@ -176,7 +176,7 @@ class EmbyLibraryCover(_PluginBase):
         result["output_size"] = (width, height)
 
         integer_specs = {
-            "s1_font_size_zh": (8, 500), "s1_font_size_en": (8, 300),
+            "s1_font_size_zh": (8, 500), "s1_font_size_en": (8, 300), "s1_title_gap": (0, 500),
             "s1_en_letter_spacing": (0, 100), "s1_en_line_spacing": (0, 200),
             "s1_poster_count": (1, 12), "s1_poster_spacing": (0, 500),
             "s1_poster_y_pos": (-2160, 4320),
@@ -188,7 +188,7 @@ class EmbyLibraryCover(_PluginBase):
             "s2_poster_count": (1, 12), "s2_poster_spacing_x": (0, 500),
             "s2_poster_spacing_y": (0, 500), "s2_poster_stagger": (-2000, 2000),
             "s2_poster_rotation": (-180, 180), "s2_font_size_zh": (8, 500),
-            "s2_font_size_en": (8, 300), "s2_en_letter_spacing": (0, 100),
+            "s2_font_size_en": (8, 300), "s2_title_gap": (0, 500), "s2_en_letter_spacing": (0, 100),
             "s2_en_line_spacing": (0, 200),
         }
         for key, bounds in integer_specs.items():
@@ -583,6 +583,7 @@ class EmbyLibraryCover(_PluginBase):
         visual_groups = [
             ("Style 1 经典横排参数", [
                 ("s1_font_size_zh", "中文字号"), ("s1_font_size_en", "英文字号"),
+                ("s1_title_gap", "中英文垂直间距"),
                 ("s1_en_letter_spacing", "英文字距"), ("s1_en_line_spacing", "英文行距"),
                 ("s1_poster_count", "海报数量"),
                 ("s1_poster_spacing", "海报间距"),
@@ -599,6 +600,7 @@ class EmbyLibraryCover(_PluginBase):
                 ("s2_poster_spacing_y", "海报纵向间距"), ("s2_poster_stagger", "列错位距离"),
                 ("s2_poster_rotation", "海报墙旋转角度"), ("s2_poster_center_x", "海报墙中心X"),
                 ("s2_poster_center_y", "海报墙中心Y"), ("s2_font_size_zh", "中文字号"),
+                ("s2_title_gap", "中英文垂直间距"),
                 ("s2_font_size_en", "英文字号"), ("s2_en_letter_spacing", "英文字距"),
                 ("s2_en_line_spacing", "英文行距"),
             ]),
@@ -645,7 +647,7 @@ class EmbyLibraryCover(_PluginBase):
             "output_dir": "", "font_zh_path": "", "font_en_path": "",
             "upload_enabled": False, "verify_upload": False,
             "verify_ssl": True, "timeout": 30,
-            "s1_font_size_zh": 150, "s1_font_size_en": 70,
+            "s1_font_size_zh": 150, "s1_font_size_en": 70, "s1_title_gap": 20,
             "s1_en_letter_spacing": 10, "s1_en_line_spacing": 12,
             "s1_poster_count": 6,
             "s1_poster_spacing": 20, "s1_poster_y_pos": 610,
@@ -659,7 +661,7 @@ class EmbyLibraryCover(_PluginBase):
             "s2_poster_spacing_x": 10, "s2_poster_spacing_y": 10,
             "s2_poster_stagger": 180, "s2_poster_rotation": -15,
             "s2_poster_center_x": 1600, "s2_poster_center_y": 540,
-            "s2_font_size_zh": 180, "s2_font_size_en": 50,
+            "s2_font_size_zh": 180, "s2_font_size_en": 50, "s2_title_gap": 24,
             "s2_en_letter_spacing": 6, "s2_en_line_spacing": 12,
             "s2_accent_bar_color": "#FF8C00",
             "s2_bg_default_color": "#1E1E23",
