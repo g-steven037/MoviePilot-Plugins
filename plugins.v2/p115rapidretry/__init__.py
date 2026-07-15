@@ -58,7 +58,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "监控目录，秒传失败时转移到临时目录，定时重试，秒传成功后删除本地文件，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "0.8.1"
+    plugin_version = "1.0.0"
     plugin_author = "115-transmission"
     author_url = "https://github.com"
     plugin_config_prefix = "p115rapidretry_"
@@ -76,6 +76,10 @@ class P115RapidRetry(_PluginBase):
     _max_retries = 10
     _notify_enabled = False
     _detailed_logs = True
+    _empty_cleanup_enabled = False
+    _empty_cleanup_root = Path()
+    _empty_cleanup_cron = "0 4 * * *"
+    _empty_cleanup_identity: Optional[Tuple[int, int]] = None
     _client: Optional[P115Client] = None
     _observer: Optional[Observer] = None
     _worker: Optional[threading.Thread] = None
@@ -108,11 +112,21 @@ class P115RapidRetry(_PluginBase):
             self._detailed_logs = bool(
                 config.get("detailed_logs", str(config.get("log_mode", "detailed")).strip().lower() == "detailed")
             )
+            self._empty_cleanup_enabled = bool(config.get("empty_cleanup_enabled", False))
             self._target_pid = self._validate_pid(str(config.get("target_pid", "0")).strip())
             self._watch_dir = self._prepare_path(config.get("watch_dir"), create=True)
             self._retry_dir = self._prepare_path(config.get("retry_dir"), create=True)
             self._protected_pt_dir = self._prepare_path(config.get("protected_pt_dir"), create=False)
             self._validate_directory_isolation()
+            self._empty_cleanup_identity = None
+            if self._empty_cleanup_enabled:
+                self._empty_cleanup_cron = str(config.get("empty_cleanup_cron", "0 4 * * *")).strip()
+                CronTrigger.from_crontab(self._empty_cleanup_cron)
+                self._empty_cleanup_root = self._prepare_path(config.get("empty_cleanup_root"), create=False)
+                if self._overlap(self._empty_cleanup_root, self._protected_pt_dir):
+                    raise ValueError("CLEANUP_OVERLAPS_PT")
+                cleanup_stat = self._safe_directory_stat(self._empty_cleanup_root)
+                self._empty_cleanup_identity = (cleanup_stat.st_dev, cleanup_stat.st_ino)
             cookie = self._validate_cookie(config.get("cookie", ""))
             self._client = self._create_client(cookie)
             del cookie
@@ -183,6 +197,15 @@ class P115RapidRetry(_PluginBase):
             raise ValueError("DIRECTORIES_NOT_SAME_FILESYSTEM")
 
     @staticmethod
+    def _safe_directory_stat(path: Path) -> os.stat_result:
+        value = path.lstat()
+        attributes = getattr(value, "st_file_attributes", 0)
+        reparse_marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode) or bool(attributes & reparse_marker):
+            raise ValueError("DIRECTORY_LINK_UNSAFE")
+        return value
+
+    @staticmethod
     def _safe_code(exc: Exception) -> str:
         text = str(exc)
         if text and text.isupper() and " " not in text and len(text) <= 64:
@@ -195,13 +218,22 @@ class P115RapidRetry(_PluginBase):
     def get_service(self) -> Optional[List[Dict[str, Any]]]:
         if not self._enabled:
             return None
-        return [{
+        services = [{
             "id": "P115RapidRetry_retry",
             "name": "115秒传临时目录限速重试",
             "trigger": CronTrigger.from_crontab(self._cron),
             "func": self.retry_pending,
             "kwargs": {},
         }]
+        if self._empty_cleanup_enabled:
+            services.append({
+                "id": "P115RapidRetry_empty_cleanup",
+                "name": "115秒传定时清理空文件夹",
+                "trigger": CronTrigger.from_crontab(self._empty_cleanup_cron),
+                "func": self.cleanup_empty_directories,
+                "kwargs": {},
+            })
+        return services
 
     def _start_realtime_monitor(self):
         self._stop_event = threading.Event()
@@ -215,6 +247,12 @@ class P115RapidRetry(_PluginBase):
         self._observer = observer
         logger.info("115秒传重试：安全实时监控已启动")
         self._queue_existing_files()
+        if self._empty_cleanup_enabled and bool((self.get_data("empty_cleanup_pending") or {}).get("pending", False)):
+            try:
+                self._events.put_nowait(("cleanup", ""))
+                logger.info("#115秒传# 已恢复更新或重启前延后的空文件夹清理任务")
+            except queue.Full:
+                pass
 
     def _put_event(self, action: str, path: Path):
         if not self._enabled:
@@ -247,6 +285,9 @@ class P115RapidRetry(_PluginBase):
                 action, raw_path = self._events.get(timeout=0.5)
                 if action == "stop":
                     break
+                if action == "cleanup":
+                    self._run_deferred_cleanup()
+                    continue
                 if action == "cancel":
                     pending.pop(raw_path, None)
                 elif len(pending) < 4096:
@@ -280,6 +321,7 @@ class P115RapidRetry(_PluginBase):
             return
         with self._operation_lock:
             self._handle(path, self._watch_dir, identity, from_retry=False)
+        self._run_deferred_cleanup()
 
     def retry_pending(self):
         if not self._enabled or not self._client or self._auth_blocked or time() < self._circuit_until:
@@ -317,6 +359,7 @@ class P115RapidRetry(_PluginBase):
                     break
         finally:
             self._operation_lock.release()
+            self._run_deferred_cleanup()
 
     @staticmethod
     def _secure_files(root: Path):
@@ -624,6 +667,117 @@ class P115RapidRetry(_PluginBase):
         except (OSError, ValueError):
             return
 
+    def cleanup_empty_directories(self):
+        if not self._enabled or not self._empty_cleanup_enabled or not self._empty_cleanup_identity:
+            return
+        if not self._operation_lock.acquire(blocking=False):
+            self._mark_cleanup_pending()
+            logger.info("#115秒传# 定时空文件夹清理已延后：等待当前文件处理完成")
+            return
+        try:
+            root = self._empty_cleanup_root
+            root_stat = self._safe_directory_stat(root)
+            if (root_stat.st_dev, root_stat.st_ino) != self._empty_cleanup_identity:
+                raise ValueError("CLEANUP_ROOT_CHANGED")
+            protected = {
+                root,
+                self._watch_dir,
+                self._retry_dir,
+                self._protected_pt_dir,
+            }
+            deleted = self._delete_empty_tree(root, protected)
+            if self._detailed_logs:
+                logger.info(
+                    f"#115秒传# 定时空文件夹清理完成 | 根目录={self._safe_log_value(root)} | 删除={deleted}"
+                )
+            else:
+                logger.info(f"#115秒传# [简短] 定时空文件夹清理完成 | 删除={deleted}")
+            self._clear_cleanup_pending()
+        except (OSError, ValueError) as exc:
+            logger.warning(f"#115秒传# 定时空文件夹清理终止 [{self._safe_code(exc)}]")
+        finally:
+            self._operation_lock.release()
+
+    def _mark_cleanup_pending(self):
+        pending = self.get_data("empty_cleanup_pending") or {}
+        already_pending = bool(pending.get("pending", False))
+        self.save_data("empty_cleanup_pending", {"pending": True, "requested_at": int(time())})
+        if not already_pending:
+            try:
+                self._events.put_nowait(("cleanup", ""))
+            except queue.Full:
+                pass
+
+    def _clear_cleanup_pending(self):
+        self.save_data("empty_cleanup_pending", {"pending": False, "requested_at": 0})
+
+    def _run_deferred_cleanup(self):
+        if not self._enabled or not self._empty_cleanup_enabled:
+            return
+        pending = self.get_data("empty_cleanup_pending") or {}
+        if bool(pending.get("pending", False)):
+            self.cleanup_empty_directories()
+
+    def _delete_empty_tree(self, root: Path, protected: set[Path]) -> int:
+        deleted = 0
+        visited = 0
+        root_resolved = root.resolve(strict=True)
+        stack: List[Tuple[Path, bool, Optional[Tuple[int, int]]]] = [(root, False, None)]
+        while stack:
+            current, expanded, expected_identity = stack.pop()
+            try:
+                current_resolved = current.resolve(strict=True)
+                if current_resolved != root_resolved and not current_resolved.is_relative_to(root_resolved):
+                    continue
+                if current_resolved != current:
+                    continue
+            except (OSError, ValueError):
+                continue
+            if expanded:
+                if current in protected:
+                    continue
+                try:
+                    value = self._safe_directory_stat(current)
+                    if expected_identity != (value.st_dev, value.st_ino):
+                        continue
+                    current.rmdir()
+                    deleted += 1
+                    if self._detailed_logs:
+                        logger.info(f"#115秒传# 定时删除空文件夹: {self._safe_log_value(current)}")
+                    else:
+                        logger.info(f"#115秒传# [简短] 定时删除空文件夹 | 文件夹={self._safe_log_value(current)}")
+                except (OSError, ValueError):
+                    continue
+                continue
+
+            try:
+                value = self._safe_directory_stat(current)
+            except (OSError, ValueError):
+                continue
+            identity = (value.st_dev, value.st_ino)
+            stack.append((current, True, identity))
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        visited += 1
+                        if visited > 100000:
+                            raise ValueError("CLEANUP_SCAN_LIMIT")
+                        try:
+                            entry_stat = entry.stat(follow_symlinks=False)
+                            attributes = getattr(entry_stat, "st_file_attributes", 0)
+                            reparse_marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                            if (
+                                entry.is_dir(follow_symlinks=False)
+                                and not entry.is_symlink()
+                                and not bool(attributes & reparse_marker)
+                            ):
+                                stack.append((Path(entry.path), False, None))
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+        return deleted
+
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         fields = [
             ("cookie", "115 Cookie（明文，密码框隐藏）", "password"),
@@ -635,12 +789,15 @@ class P115RapidRetry(_PluginBase):
             ("stable_seconds", "文件稳定等待秒数（1-3600）", "number"),
             ("max_batch", "每轮最大重试文件数（1-100）", "number"),
             ("max_retries", "单文件最大重试次数（1-100）", "number"),
+            ("empty_cleanup_root", "定时清理空文件夹根目录", None),
+            ("empty_cleanup_cron", "空文件夹清理 Cron（5段）", None),
         ]
         content = [{"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "text": "Cookie 仅用于登录115官方接口，不发送给其他第三方，不写入插件日志或历史；MoviePilot 会将其保存在自身配置中，请保护管理端和数据目录。"}}]}]}]
         content.append({"component": "VRow", "content": [
-            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "插件启用"}}]},
-            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "notify_enabled", "label": "Bot通知"}}]},
-            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "detailed_logs", "label": "详细日志"}}]},
+            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "插件启用"}}]},
+            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "notify_enabled", "label": "Bot通知"}}]},
+            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "detailed_logs", "label": "详细日志"}}]},
+            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "empty_cleanup_enabled", "label": "定时清理空文件夹"}}]},
         ]})
         for model, label, field_type in fields:
             props = {"model": model, "label": label, "clearable": False}
@@ -650,9 +807,11 @@ class P115RapidRetry(_PluginBase):
                 props["autocomplete"] = "new-password"
             content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": props}]}]})
         return [{"component": "VForm", "content": content}], {
-            "enabled": False, "notify_enabled": False, "detailed_logs": True, "cookie": "",
+            "enabled": False, "notify_enabled": False, "detailed_logs": True,
+            "empty_cleanup_enabled": False, "cookie": "",
             "protected_pt_dir": "", "watch_dir": "", "retry_dir": "", "target_pid": "0",
             "cron": "*/10 * * * *", "stable_seconds": 10, "max_batch": 10, "max_retries": 10,
+            "empty_cleanup_root": "", "empty_cleanup_cron": "0 4 * * *",
         }
 
     def get_page(self) -> List[dict]:
