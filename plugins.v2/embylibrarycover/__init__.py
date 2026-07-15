@@ -25,7 +25,7 @@ class EmbyLibraryCover(_PluginBase):
     plugin_name = "Emby媒体库封面"
     plugin_desc = "根据Emby最新媒体海报生成横版媒体库封面，可按Cron定时生成并选择性上传覆盖，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/emby-library-cover.svg"
-    plugin_version = "0.1.3"
+    plugin_version = "0.1.4"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "embylibrarycover_"
@@ -154,11 +154,14 @@ class EmbyLibraryCover(_PluginBase):
 
     @staticmethod
     def _resolve_moviepilot_emby(helper: Any, selected_name: str = "") -> Tuple[str, str, str, str]:
-        services = helper.get_services(type_filter="emby") or {}
         configs = helper.get_configs() or {}
+        try:
+            services = helper.get_services(type_filter="emby") or {}
+        except Exception:
+            services = {}
         candidates = sorted(
             name for name, conf in configs.items()
-            if str(getattr(conf, "type", "")).lower() == "emby"
+            if str(getattr(getattr(conf, "type", ""), "value", getattr(conf, "type", ""))).lower() == "emby"
         )
         if not candidates:
             raise ValueError("MP_EMBY_NOT_FOUND")
@@ -166,7 +169,7 @@ class EmbyLibraryCover(_PluginBase):
         if name not in candidates:
             raise ValueError("MP_EMBY_NOT_FOUND")
         service = services.get(name)
-        conf = getattr(service, "config", None) if service else configs.get(name)
+        conf = (getattr(service, "config", None) if service else None) or configs.get(name)
         values = getattr(conf, "config", None) or {}
         if not isinstance(values, dict):
             raise ValueError("MP_EMBY_CONFIG_INVALID")
@@ -193,7 +196,7 @@ class EmbyLibraryCover(_PluginBase):
             configs = MediaServerHelper().get_configs() or {}
             names = sorted(
                 name for name, conf in configs.items()
-                if str(getattr(conf, "type", "")).lower() == "emby"
+                if str(getattr(getattr(conf, "type", ""), "value", getattr(conf, "type", ""))).lower() == "emby"
             )
             return [{"title": name, "value": name} for name in names]
         except Exception:
@@ -337,6 +340,16 @@ class EmbyLibraryCover(_PluginBase):
         self.save_data("history", history[:100])
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        server_items = self._moviepilot_emby_items()
+        if server_items:
+            detected_text = (
+                f"已从MoviePilot检测到 {len(server_items)} 个已启用的Emby服务器。"
+                "自动读取不会把API Key回填到下方手动输入框；启用插件并保存时才读取使用。"
+            )
+            detected_type = "info"
+        else:
+            detected_text = "未检测到MoviePilot中已启用的Emby服务器；请先检查媒体服务器设置，或关闭自动读取后使用手动参数。"
+            detected_type = "error"
         alert = {
             "component": "VAlert",
             "props": {
@@ -351,11 +364,20 @@ class EmbyLibraryCover(_PluginBase):
             ("verify_ssl", "校验HTTPS证书"),
         ]
         content = [{"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [alert]}]}]
+        content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{
+            "component": "VAlert", "props": {"type": detected_type, "variant": "tonal", "text": detected_text}
+        }]}]})
         content.append({"component": "VRow", "content": [
             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                 {"component": "VSwitch", "props": {"model": model, "label": label}}
             ]} for model, label in switches
         ]})
+        content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{
+            "component": "VSelect", "props": {
+                "model": "media_server", "label": "MoviePilot中的Emby服务器（留空自动选择第一个）",
+                "clearable": True, "items": server_items,
+            }
+        }]}]})
         fields = [
             ("emby_url", "手动Emby地址（关闭自动读取时使用）", "text"),
             ("api_key", "手动Emby API Key（关闭自动读取时使用）", "password"),
@@ -375,7 +397,6 @@ class EmbyLibraryCover(_PluginBase):
                 {"component": "VTextField", "props": props}
             ]}]})
         selects = [
-            ("media_server", "MoviePilot中的Emby服务器（留空自动选择第一个）", self._moviepilot_emby_items()),
             ("style", "封面样式", [("经典横排", "style_1"), ("倾斜海报墙", "style_2")]),
             ("output_format", "输出格式", [("JPG", "jpg"), ("PNG", "png")]),
             ("upload_target", "上传目标", [("媒体库ItemId", "item"), ("虚拟媒体库", "virtual_folder"), ("两者", "both")]),

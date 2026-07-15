@@ -109,6 +109,7 @@ https://github.com/g-steven037/MoviePilot-Plugins
 - `使用MoviePilot的Emby配置`：默认开启。通过MoviePilot官方 `MediaServerHelper` 读取已启用的Emby地址、API Key，并优先使用运行实例已解析的用户ID；敏感参数只在内存中使用，不复制到插件配置、日志或历史。
 - `MoviePilot中的Emby服务器`：存在多个已启用Emby实例时可以指定；留空自动按名称选择第一个。
 - `手动Emby地址/API Key/用户ID`：仅在关闭自动读取时生效。地址必须是MoviePilot容器可访问的最终地址；API Key只通过 `X-Emby-Token` 请求头发送，不拼接到URL。
+- 自动读取不会将MoviePilot保存的地址或API Key回填到手动输入框。配置页顶部会显示检测到的Emby服务器数量；选择服务器后，需要同时打开“插件启用”并保存，插件初始化时才会读取使用。
 - `媒体库标题映射`：每行格式为 `媒体库名称|中文标题|英文标题`；英文标题需要换行时填写字面量 `\n`。
 - `输出目录`：留空时写入 MoviePilot 配置目录下的 `plugins/embylibrarycover/output`；也可填写容器内可写的绝对路径。
 - `中文/英文字体路径`：可留空使用系统字体，也可填写容器内已存在的 `.ttf`、`.otf` 或 `.ttc` 绝对路径。
