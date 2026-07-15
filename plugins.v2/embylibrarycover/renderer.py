@@ -31,6 +31,11 @@ DEFAULT_RENDER_CONFIG: dict[str, Any] = {
     "s2_title_gap": 24, "s2_en_letter_spacing": 6, "s2_en_line_spacing": 12,
     "s2_accent_bar_enable": True, "s2_accent_bar_color": (255, 140, 0),
     "s2_bg_auto_color": True, "s2_bg_default_color": (30, 30, 35),
+    "s3_poster_count": 4, "s3_text_pos": (160, 350),
+    "s3_font_size_zh": 150, "s3_font_size_en": 46,
+    "s3_title_gap": 28, "s3_en_letter_spacing": 8, "s3_en_line_spacing": 10,
+    "s3_overlay_alpha": 55, "s3_left_gradient_alpha": 235,
+    "s3_accent_color": (218, 178, 105),
 }
 
 
@@ -85,6 +90,8 @@ class CoverRenderer:
         self.size = tuple(self.config["output_size"])
 
     def poster_count(self, style: str) -> int:
+        if style == "style_3":
+            return int(self.config["s3_poster_count"])
         return int(self.config["s2_poster_count"] if style == "style_2" else self.config["s1_poster_count"])
 
     def validate_fonts(self) -> None:
@@ -93,7 +100,12 @@ class CoverRenderer:
     def render(self, style: str, title: dict[str, str], posters: list[Image.Image], backdrop: Image.Image | None, output_path: Path) -> Path:
         if not posters:
             raise ValueError("POSTERS_EMPTY")
-        image = self._style_2(title, posters) if style == "style_2" else self._style_1(title, posters, backdrop)
+        if style == "style_3":
+            image = self._style_3(title, posters, backdrop)
+        elif style == "style_2":
+            image = self._style_2(title, posters)
+        else:
+            image = self._style_1(title, posters, backdrop)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         if self.config["output_format"] == "png":
             image.save(output_path, "PNG", optimize=True)
@@ -165,6 +177,56 @@ class CoverRenderer:
             x += 28
         _multiline(draw, (x, en_y), title["en"], en_font, (255, 255, 255, 225), c["s2_en_line_spacing"], c["s2_en_letter_spacing"])
         return canvas.convert("RGB")
+
+    def _style_3(self, title: dict[str, str], posters: list[Image.Image], backdrop: Image.Image | None) -> Image.Image:
+        c = self.config
+        if backdrop:
+            base = _fit(backdrop, self.size)
+        else:
+            base = self._poster_strip(posters[:c["s3_poster_count"]])
+        canvas = base.convert("RGBA")
+        canvas.alpha_composite(Image.new("RGBA", self.size, (0, 0, 0, c["s3_overlay_alpha"])))
+
+        gradient = Image.new("RGBA", self.size, (0, 0, 0, 0))
+        gradient_draw = ImageDraw.Draw(gradient)
+        gradient_width = max(1, int(self.size[0] * 0.72))
+        for x in range(gradient_width):
+            ratio = 1 - x / gradient_width
+            alpha = int(c["s3_left_gradient_alpha"] * ratio ** 1.65)
+            gradient_draw.line((x, 0, x, self.size[1]), fill=(5, 7, 9, alpha))
+        canvas.alpha_composite(gradient)
+        self._bottom_gradient(canvas, 115)
+
+        draw = ImageDraw.Draw(canvas)
+        accent = tuple(c["s3_accent_color"])
+        inset = max(12, int(min(self.size) * 0.018))
+        radius = max(18, int(min(self.size) * 0.035))
+        draw.rounded_rectangle(
+            (inset, inset, self.size[0] - inset - 1, self.size[1] - inset - 1),
+            radius=radius, outline=accent + (185,), width=max(2, int(min(self.size) * 0.003)),
+        )
+
+        zh_font, en_font = self._fonts(c["s3_font_size_zh"], c["s3_font_size_en"])
+        x, y = c["s3_text_pos"]
+        draw.rounded_rectangle((x, y - 42, x + 125, y - 34), radius=4, fill=accent + (235,))
+        draw.text((x, y), title["zh"], font=zh_font, fill=(255, 250, 240, 250))
+        en_xy = _english_title_position(draw, (x, y), x + 4, title["zh"], zh_font, c["s3_title_gap"])
+        _multiline(
+            draw, en_xy, title["en"], en_font, (238, 222, 194, 238),
+            c["s3_en_line_spacing"], c["s3_en_letter_spacing"],
+        )
+        return canvas.convert("RGB")
+
+    def _poster_strip(self, posters: list[Image.Image]) -> Image.Image:
+        if not posters:
+            raise ValueError("POSTERS_EMPTY")
+        count = min(4, len(posters))
+        strip = Image.new("RGB", self.size, (18, 20, 24))
+        segment_width = (self.size[0] + count - 1) // count
+        for index, poster in enumerate(posters[:count]):
+            segment = _fit(poster, (segment_width, self.size[1]))
+            strip.paste(segment, (index * segment_width, 0))
+        return strip
 
     def _poster_wall(self, posters: list[Image.Image]) -> Image.Image:
         c = self.config

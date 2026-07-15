@@ -100,6 +100,7 @@ def test_form_defaults_to_generation_only_and_password_field():
     serialized = repr(form)
     assert "'model': 'api_key'" in serialized
     assert "'type': 'password'" in serialized
+    assert "'value': 'style_3'" in serialized
     for model in (
         "s1_snow_density", "s1_overlay_alpha", "s2_poster_rotation",
         "s2_accent_bar_color", "output_width", "cron",
@@ -187,12 +188,17 @@ def test_renderer_creates_both_styles(tmp_path: Path):
     posters = [Image.new("RGB", (120, 180), (40 + index * 10, 80, 120)) for index in range(9)]
     backdrop = Image.new("RGB", (320, 180), (20, 30, 40))
     renderer = CoverRenderer({"output_format": "jpg", "jpeg_quality": 80, "output_size": (1280, 720)})
-    for style in ("style_1", "style_2"):
+    for style in ("style_1", "style_2", "style_3"):
         path = tmp_path / f"{style}.jpg"
         renderer.render(style, {"zh": "电影", "en": "MOVIES"}, posters, backdrop, path)
         with Image.open(path) as image:
             assert image.size == (1280, 720)
             assert image.format == "JPEG"
+    assert renderer.poster_count("style_3") == 4
+    fallback_path = tmp_path / "style_3-no-backdrop.jpg"
+    renderer.render("style_3", {"zh": "电影", "en": "MOVIES"}, posters, None, fallback_path)
+    with Image.open(fallback_path) as image:
+        assert image.size == (1280, 720)
 
 
 def test_embedded_font_exists_and_renders_chinese(tmp_path: Path):

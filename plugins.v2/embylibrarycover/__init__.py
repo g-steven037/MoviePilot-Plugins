@@ -54,7 +54,7 @@ class EmbyLibraryCover(_PluginBase):
     plugin_name = "Emby媒体库封面"
     plugin_desc = "根据Emby最新媒体海报生成横版媒体库封面，可按Cron定时生成并选择性上传覆盖，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/emby-library-cover.svg"
-    plugin_version = "0.1.11"
+    plugin_version = "0.2.0"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "embylibrarycover_"
@@ -86,7 +86,7 @@ class EmbyLibraryCover(_PluginBase):
             CronTrigger.from_crontab(self._cron)
             self._library_map = self._parse_library_map(config.get("library_map", DEFAULT_LIBRARY_MAP))
             self._style = str(config.get("style", "style_1")).strip()
-            if self._style not in {"style_1", "style_2"}:
+            if self._style not in {"style_1", "style_2", "style_3"}:
                 raise ValueError("STYLE_INVALID")
             timeout = self._bounded_int(config.get("timeout", 30), 5, 120)
             self._output_dir = self._prepare_output_dir(config.get("output_dir", ""))
@@ -570,7 +570,10 @@ class EmbyLibraryCover(_PluginBase):
                 {"component": "VTextField", "props": props}
             ]}]})
         selects = [
-            ("style", "封面样式", [("经典横排", "style_1"), ("倾斜海报墙", "style_2")]),
+            ("style", "封面样式", [
+                ("经典横排", "style_1"), ("倾斜海报墙", "style_2"),
+                ("横版电影卡片", "style_3"),
+            ]),
             ("output_format", "输出格式", [("JPG", "jpg"), ("PNG", "png")]),
         ]
         for model, label, items in selects:
