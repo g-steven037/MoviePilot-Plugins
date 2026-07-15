@@ -1,7 +1,7 @@
 {
   "P115RapidRetry": {
-    "name": "115秒传重试（仅自用）",
-    "description": "监控目录，秒传失败时转移到临时目录，定时重试，秒传成功后删除本地文件，仅自用测试。",
+    "name": "115秒传重试",
+    "description": "（仅自用）监控目录，秒传失败时转移到临时目录，定时重试，秒传成功后删除本地文件，仅自用测试。",
     "labels": "网盘,115,秒传",
     "version": "1.0.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png",
