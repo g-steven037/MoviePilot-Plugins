@@ -23,5 +23,18 @@
       "v0.1.1": "硬链接目录改为文件系统事件实时监控，临时目录继续按 Cron 重试",
       "v0.1.0": "支持目录监控、CK登录、纯秒传、失败转移、Cron重试和成功删除"
     }
+  },
+  "EmbyLibraryCover": {
+    "name": "Emby媒体库封面",
+    "description": "根据Emby最新媒体海报生成横版媒体库封面，可按Cron定时生成并选择性上传覆盖，仅自用测试。",
+    "labels": "Emby,媒体库,封面",
+    "version": "0.1.0",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/emby.png",
+    "author": "g-steven037",
+    "level": 1,
+    "v2": true,
+    "history": {
+      "v0.1.0": "首次发布：支持两种横版媒体库封面样式、Cron定时生成、立即运行、可选安全上传及处理历史"
+    }
   }
 }
