@@ -146,6 +146,14 @@ def test_title_gap_and_english_letter_spacing_affect_pixels():
     assert second[1] - first[1] == 60
 
 
+def test_style3_accent_color_tracks_background_and_stays_visible():
+    red = CoverRenderer._accent_color(Image.new("RGB", (32, 32), (150, 35, 25)))
+    blue = CoverRenderer._accent_color(Image.new("RGB", (32, 32), (25, 80, 165)))
+    assert red[0] > red[1] and red[0] > red[2]
+    assert blue[2] > blue[0] and blue[2] > blue[1]
+    assert max(red) >= 183 and max(blue) >= 183
+
+
 def test_moviepilot_emby_config_is_resolved_without_copying_secrets():
     first = types.SimpleNamespace(type=types.SimpleNamespace(value="emby"), config={"host": "http://emby-a:8096", "apikey": "secret-a"})
     second = types.SimpleNamespace(type="emby", config={"host": "https://emby-b:8920", "apikey": "secret-b"})

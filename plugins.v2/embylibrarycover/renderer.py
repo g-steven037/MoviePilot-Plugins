@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import colorsys
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,6 @@ DEFAULT_RENDER_CONFIG: dict[str, Any] = {
     "s3_font_size_zh": 150, "s3_font_size_en": 46,
     "s3_title_gap": 28, "s3_en_letter_spacing": 8, "s3_en_line_spacing": 10,
     "s3_overlay_alpha": 55, "s3_left_gradient_alpha": 235,
-    "s3_accent_color": (218, 178, 105),
 }
 
 
@@ -198,13 +198,7 @@ class CoverRenderer:
         self._bottom_gradient(canvas, 115)
 
         draw = ImageDraw.Draw(canvas)
-        accent = tuple(c["s3_accent_color"])
-        inset = max(12, int(min(self.size) * 0.018))
-        radius = max(18, int(min(self.size) * 0.035))
-        draw.rounded_rectangle(
-            (inset, inset, self.size[0] - inset - 1, self.size[1] - inset - 1),
-            radius=radius, outline=accent + (185,), width=max(2, int(min(self.size) * 0.003)),
-        )
+        accent = self._accent_color(base)
 
         zh_font, en_font = self._fonts(c["s3_font_size_zh"], c["s3_font_size_en"])
         x, y = c["s3_text_pos"]
@@ -281,3 +275,13 @@ class CoverRenderer:
     def _dominant(image: Image.Image) -> tuple[int, int, int]:
         mean = ImageStat.Stat(image.convert("RGB").resize((1, 1), Image.Resampling.BOX)).mean
         return tuple(max(20, min(90, int(channel * 0.55))) for channel in mean)
+
+    @staticmethod
+    def _accent_color(image: Image.Image) -> tuple[int, int, int]:
+        mean = ImageStat.Stat(image.convert("RGB").resize((1, 1), Image.Resampling.BOX)).mean
+        red, green, blue = (channel / 255 for channel in mean)
+        hue, saturation, value = colorsys.rgb_to_hsv(red, green, blue)
+        saturation = max(0.38, min(0.78, saturation * 1.35))
+        value = max(0.72, min(0.92, value * 1.18))
+        result = colorsys.hsv_to_rgb(hue, saturation, value)
+        return tuple(max(0, min(255, round(channel * 255))) for channel in result)
