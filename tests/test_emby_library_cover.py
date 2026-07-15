@@ -16,6 +16,8 @@ from embylibrarycover import (
 )
 from embylibrarycover.client import EmbyClient, EmbyError, validate_base_url
 from embylibrarycover.renderer import CoverRenderer, DEFAULT_RENDER_CONFIG
+from app.core.config import settings
+from fontTools.ttLib import TTFont
 from PIL import Image, ImageFont
 
 
@@ -170,16 +172,27 @@ def test_renderer_creates_both_styles(tmp_path: Path):
 
 
 def test_embedded_font_exists_and_renders_chinese(tmp_path: Path):
+    settings.CONFIG_PATH = str(tmp_path)
     zh_font_path = EmbyLibraryCover._embedded_font_path(EMBEDDED_ZH_FONT_NAME)
     en_font_path = EmbyLibraryCover._embedded_font_path(EMBEDDED_EN_FONT_NAME)
-    assert Path(zh_font_path).name == "NotoSansCJKsc-Bold.otf"
+    assert Path(zh_font_path).name == "MoviePilotCJKsc-Bold.otf"
     assert Path(en_font_path).name == "Melete-Bold.otf"
     zh_font = ImageFont.truetype(zh_font_path, 32)
     en_font = ImageFont.truetype(en_font_path, 32)
     for text in ("华语电影", "动画剧集", "综艺儿童", "纪录片精选合集"):
         assert zh_font.getbbox(text) is not None
+    parsed = TTFont(zh_font_path, lazy=True)
+    cmap = parsed.getBestCmap() or {}
+    assert all(ord(char) in cmap for char in "华语电影动画剧集综艺儿童纪录片精选合集")
+    parsed.close()
     assert en_font.getbbox("ANIME MOVIES TV SHOWS") is not None
     assert EmbyLibraryCover._embedded_font_path("../outside.ttf") == ""
+    try:
+        CoverRenderer({"font_zh_path": str(tmp_path / "missing.otf")}).validate_fonts()
+    except ValueError as exc:
+        assert str(exc) == "FONT_FILE_MISSING"
+    else:
+        raise AssertionError("missing configured font silently fell back")
     renderer = CoverRenderer({
         "font_zh_path": zh_font_path,
         "font_en_path": en_font_path,

@@ -35,7 +35,14 @@ DEFAULT_RENDER_CONFIG: dict[str, Any] = {
 
 
 def _font(path: str, size: int, fallbacks: tuple[str, ...]):
-    for candidate in (path, *fallbacks):
+    if path:
+        if not Path(path).is_file():
+            raise ValueError("FONT_FILE_MISSING")
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError as exc:
+            raise ValueError("FONT_LOAD_FAILED") from exc
+    for candidate in fallbacks:
         if candidate and Path(candidate).is_file():
             try:
                 return ImageFont.truetype(candidate, size)
@@ -74,6 +81,9 @@ class CoverRenderer:
 
     def poster_count(self, style: str) -> int:
         return int(self.config["s2_poster_count"] if style == "style_2" else self.config["s1_poster_count"])
+
+    def validate_fonts(self) -> None:
+        self._fonts(int(self.config["s1_font_size_zh"]), int(self.config["s1_font_size_en"]))
 
     def render(self, style: str, title: dict[str, str], posters: list[Image.Image], backdrop: Image.Image | None, output_path: Path) -> Path:
         if not posters:
