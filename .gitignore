@@ -1,0 +1,34 @@
+# Secrets: never commit plaintext credentials or encryption keys
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.secret
+*cookie*.txt
+secrets/
+
+# Python and local verification environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.publish-venv/
+.publish-settings.json
+.testdeps/
+venv/
+.venv/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local MoviePilot/runtime data
+config/
+logs/
+data/
