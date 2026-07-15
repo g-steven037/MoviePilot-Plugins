@@ -61,9 +61,9 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "（仅自用）监控目录，秒传失败时转移到临时目录，定时重试，秒传成功后删除本地文件，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "1.0.2"
-    plugin_author = "115-transmission"
-    author_url = "https://github.com"
+    plugin_version = "1.0.3"
+    plugin_author = "g-steven037"
+    author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
     plugin_order = 30
     auth_level = 2
