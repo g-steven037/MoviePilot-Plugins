@@ -8,7 +8,7 @@ import threading
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
-from secrets import randbelow, token_hex
+from secrets import token_hex
 from time import monotonic, time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -17,6 +17,7 @@ from p115client import P115Client
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
+from app.core.config import settings
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import NotificationType
@@ -55,7 +56,7 @@ class _WatchHandler(FileSystemEventHandler):
 
 
 class P115RapidRetry(_PluginBase):
-    plugin_name = "115秒传重试"
+    plugin_name = "115秒传重试（仅自用）"
     plugin_desc = "监控目录，秒传失败时转移到临时目录，定时重试，秒传成功后删除本地文件，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
     plugin_version = "1.0.0"
@@ -77,9 +78,9 @@ class P115RapidRetry(_PluginBase):
     _notify_enabled = False
     _detailed_logs = True
     _empty_cleanup_enabled = False
-    _empty_cleanup_root = Path()
+    _empty_cleanup_roots: List[Path] = []
     _empty_cleanup_cron = "0 4 * * *"
-    _empty_cleanup_identity: Optional[Tuple[int, int]] = None
+    _empty_cleanup_identities: Dict[Path, Tuple[int, int]] = {}
     _client: Optional[P115Client] = None
     _observer: Optional[Observer] = None
     _worker: Optional[threading.Thread] = None
@@ -118,15 +119,17 @@ class P115RapidRetry(_PluginBase):
             self._retry_dir = self._prepare_path(config.get("retry_dir"), create=True)
             self._protected_pt_dir = self._prepare_path(config.get("protected_pt_dir"), create=False)
             self._validate_directory_isolation()
-            self._empty_cleanup_identity = None
+            self._empty_cleanup_roots = []
+            self._empty_cleanup_identities = {}
             if self._empty_cleanup_enabled:
                 self._empty_cleanup_cron = str(config.get("empty_cleanup_cron", "0 4 * * *")).strip()
                 CronTrigger.from_crontab(self._empty_cleanup_cron)
-                self._empty_cleanup_root = self._prepare_path(config.get("empty_cleanup_root"), create=False)
-                if self._overlap(self._empty_cleanup_root, self._protected_pt_dir):
-                    raise ValueError("CLEANUP_OVERLAPS_PT")
-                cleanup_stat = self._safe_directory_stat(self._empty_cleanup_root)
-                self._empty_cleanup_identity = (cleanup_stat.st_dev, cleanup_stat.st_ino)
+                self._empty_cleanup_roots = self._prepare_cleanup_roots(config.get("empty_cleanup_root"))
+                for cleanup_root in self._empty_cleanup_roots:
+                    if self._overlap(cleanup_root, self._protected_pt_dir):
+                        raise ValueError("CLEANUP_OVERLAPS_PT")
+                    cleanup_stat = self._safe_directory_stat(cleanup_root)
+                    self._empty_cleanup_identities[cleanup_root] = (cleanup_stat.st_dev, cleanup_stat.st_ino)
             cookie = self._validate_cookie(config.get("cookie", ""))
             self._client = self._create_client(cookie)
             del cookie
@@ -142,6 +145,22 @@ class P115RapidRetry(_PluginBase):
         if not minimum <= number <= maximum:
             raise ValueError("CONFIG_OUT_OF_RANGE")
         return number
+
+    def _prepare_cleanup_roots(self, value: Any) -> List[Path]:
+        values = value if isinstance(value, (list, tuple)) else str(value or "").splitlines()
+        roots: List[Path] = []
+        seen = set()
+        for raw in values:
+            text = str(raw).strip()
+            if not text:
+                continue
+            root = self._prepare_path(text, create=False)
+            if root not in seen:
+                seen.add(root)
+                roots.append(root)
+        if not roots:
+            raise ValueError("CLEANUP_ROOT_REQUIRED")
+        return roots
 
     @staticmethod
     def _validate_pid(value: str) -> str:
@@ -247,12 +266,6 @@ class P115RapidRetry(_PluginBase):
         self._observer = observer
         logger.info("115秒传重试：安全实时监控已启动")
         self._queue_existing_files()
-        if self._empty_cleanup_enabled and bool((self.get_data("empty_cleanup_pending") or {}).get("pending", False)):
-            try:
-                self._events.put_nowait(("cleanup", ""))
-                logger.info("#115秒传# 已恢复更新或重启前延后的空文件夹清理任务")
-            except queue.Full:
-                pass
 
     def _put_event(self, action: str, path: Path):
         if not self._enabled:
@@ -285,9 +298,6 @@ class P115RapidRetry(_PluginBase):
                 action, raw_path = self._events.get(timeout=0.5)
                 if action == "stop":
                     break
-                if action == "cleanup":
-                    self._run_deferred_cleanup()
-                    continue
                 if action == "cancel":
                     pending.pop(raw_path, None)
                 elif len(pending) < 4096:
@@ -321,7 +331,6 @@ class P115RapidRetry(_PluginBase):
             return
         with self._operation_lock:
             self._handle(path, self._watch_dir, identity, from_retry=False)
-        self._run_deferred_cleanup()
 
     def retry_pending(self):
         if not self._enabled or not self._client or self._auth_blocked or time() < self._circuit_until:
@@ -339,7 +348,6 @@ class P115RapidRetry(_PluginBase):
             eligible = [
                 path for path in files
                 if not bool(state.get(self._task_id(path, self._retry_dir), {}).get("exhausted", False))
-                and float(state.get(self._task_id(path, self._retry_dir), {}).get("next_at", 0)) <= time()
             ]
             if self._detailed_logs:
                 logger.info(
@@ -351,15 +359,12 @@ class P115RapidRetry(_PluginBase):
                 task_state = state.get(task_id, {})
                 if bool(task_state.get("exhausted", False)):
                     continue
-                if float(task_state.get("next_at", 0)) > time():
-                    continue
                 self._handle(path, self._retry_dir, None, from_retry=True)
                 processed += 1
                 if processed >= self._max_batch or self._auth_blocked or time() < self._circuit_until:
                     break
         finally:
             self._operation_lock.release()
-            self._run_deferred_cleanup()
 
     @staticmethod
     def _secure_files(root: Path):
@@ -445,7 +450,7 @@ class P115RapidRetry(_PluginBase):
             return
 
         if from_retry:
-            attempts, exhausted = self._schedule_retry(task_id, result.code, result.retryable)
+            attempts, exhausted = self._schedule_retry(task_id, result.code)
             if exhausted:
                 self._record(task_id, False, "RETRY_EXHAUSTED")
                 logger.warning(
@@ -529,32 +534,21 @@ class P115RapidRetry(_PluginBase):
         return sha256(value.encode("utf-8")).hexdigest()[:16]
 
     def _initialize_retry(self, task_id: str, code: str):
-        delay = 300 + randbelow(61)
         state = self.get_data("retry_state") or {}
         state[task_id] = {
             "attempts": 0,
-            "next_at": time() + delay,
             "code": self._normalize_code(code),
             "exhausted": False,
         }
         self.save_data("retry_state", state)
 
-    def _schedule_retry(self, task_id: str, code: str, retryable: bool) -> Tuple[int, bool]:
+    def _schedule_retry(self, task_id: str, code: str) -> Tuple[int, bool]:
         state = self.get_data("retry_state") or {}
         previous = state.get(task_id, {})
         attempts = min(int(previous.get("attempts", 0)) + 1, 1000)
         exhausted = attempts >= self._max_retries
-        if exhausted:
-            next_at = 0
-        elif retryable:
-            delay = min(86400, 300 * (2 ** min(attempts - 1, 8)))
-            delay += randbelow(max(1, delay // 5 + 1))
-            next_at = time() + delay
-        else:
-            next_at = time() + 86400
         state[task_id] = {
             "attempts": attempts,
-            "next_at": next_at,
             "code": self._normalize_code(code),
             "exhausted": exhausted,
         }
@@ -587,7 +581,16 @@ class P115RapidRetry(_PluginBase):
 
     def _post_bot(self, title: str, text: str):
         try:
-            self.post_message(mtype=NotificationType.Plugin, title=title, text=text)
+            self.post_message(
+                mtype=NotificationType.Plugin,
+                title=title,
+                text=text,
+                username=settings.SUPERUSER,
+            )
+            logger.info(
+                f"#115秒传# {'Bot通知已提交给管理员' if self._detailed_logs else '[简短] Bot通知=已提交 | 接收者=管理员'}"
+                f" | 标题={self._safe_log_value(title)}"
+            )
         except Exception:
             logger.warning("#115秒传# MoviePilot Bot通知发送失败 [NOTIFY_FAILED]")
 
@@ -668,55 +671,47 @@ class P115RapidRetry(_PluginBase):
             return
 
     def cleanup_empty_directories(self):
-        if not self._enabled or not self._empty_cleanup_enabled or not self._empty_cleanup_identity:
+        if not self._enabled or not self._empty_cleanup_enabled or not self._empty_cleanup_identities:
             return
         if not self._operation_lock.acquire(blocking=False):
-            self._mark_cleanup_pending()
-            logger.info("#115秒传# 定时空文件夹清理已延后：等待当前文件处理完成")
+            logger.info("#115秒传# 定时空文件夹清理本轮跳过：当前有文件正在处理")
             return
         try:
-            root = self._empty_cleanup_root
-            root_stat = self._safe_directory_stat(root)
-            if (root_stat.st_dev, root_stat.st_ino) != self._empty_cleanup_identity:
-                raise ValueError("CLEANUP_ROOT_CHANGED")
             protected = {
-                root,
+                *self._empty_cleanup_roots,
                 self._watch_dir,
                 self._retry_dir,
                 self._protected_pt_dir,
             }
-            deleted = self._delete_empty_tree(root, protected)
+            deleted = 0
+            completed = 0
+            for root in self._empty_cleanup_roots:
+                try:
+                    root_stat = self._safe_directory_stat(root)
+                    if (root_stat.st_dev, root_stat.st_ino) != self._empty_cleanup_identities.get(root):
+                        raise ValueError("CLEANUP_ROOT_CHANGED")
+                    root_deleted = self._delete_empty_tree(root, protected)
+                    deleted += root_deleted
+                    completed += 1
+                    if self._detailed_logs:
+                        logger.info(
+                            f"#115秒传# 定时空文件夹清理完成 | 根目录={self._safe_log_value(root)} | 删除={root_deleted}"
+                        )
+                except (OSError, ValueError) as exc:
+                    logger.warning(
+                        f"#115秒传# 定时空文件夹清理跳过根目录 | 根目录={self._safe_log_value(root)} | "
+                        f"代码={self._safe_code(exc)}"
+                    )
             if self._detailed_logs:
                 logger.info(
-                    f"#115秒传# 定时空文件夹清理完成 | 根目录={self._safe_log_value(root)} | 删除={deleted}"
+                    f"#115秒传# 定时空文件夹清理本轮结束 | 根目录={completed}/{len(self._empty_cleanup_roots)} | 删除={deleted}"
                 )
             else:
-                logger.info(f"#115秒传# [简短] 定时空文件夹清理完成 | 删除={deleted}")
-            self._clear_cleanup_pending()
-        except (OSError, ValueError) as exc:
-            logger.warning(f"#115秒传# 定时空文件夹清理终止 [{self._safe_code(exc)}]")
+                logger.info(
+                    f"#115秒传# [简短] 定时空文件夹清理完成 | 根目录={completed}/{len(self._empty_cleanup_roots)} | 删除={deleted}"
+                )
         finally:
             self._operation_lock.release()
-
-    def _mark_cleanup_pending(self):
-        pending = self.get_data("empty_cleanup_pending") or {}
-        already_pending = bool(pending.get("pending", False))
-        self.save_data("empty_cleanup_pending", {"pending": True, "requested_at": int(time())})
-        if not already_pending:
-            try:
-                self._events.put_nowait(("cleanup", ""))
-            except queue.Full:
-                pass
-
-    def _clear_cleanup_pending(self):
-        self.save_data("empty_cleanup_pending", {"pending": False, "requested_at": 0})
-
-    def _run_deferred_cleanup(self):
-        if not self._enabled or not self._empty_cleanup_enabled:
-            return
-        pending = self.get_data("empty_cleanup_pending") or {}
-        if bool(pending.get("pending", False)):
-            self.cleanup_empty_directories()
 
     def _delete_empty_tree(self, root: Path, protected: set[Path]) -> int:
         deleted = 0
@@ -789,7 +784,7 @@ class P115RapidRetry(_PluginBase):
             ("stable_seconds", "文件稳定等待秒数（1-3600）", "number"),
             ("max_batch", "每轮最大重试文件数（1-100）", "number"),
             ("max_retries", "单文件最大重试次数（1-100）", "number"),
-            ("empty_cleanup_root", "定时清理空文件夹根目录", None),
+            ("empty_cleanup_root", "定时清理空文件夹根目录（每行一个绝对路径）", None),
             ("empty_cleanup_cron", "空文件夹清理 Cron（5段）", None),
         ]
         content = [{"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "text": "Cookie 仅用于登录115官方接口，不发送给其他第三方，不写入插件日志或历史；MoviePilot 会将其保存在自身配置中，请保护管理端和数据目录。"}}]}]}]
@@ -805,7 +800,15 @@ class P115RapidRetry(_PluginBase):
                 props["type"] = field_type
             if model == "cookie":
                 props["autocomplete"] = "new-password"
-            content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": props}]}]})
+            component = "VTextField"
+            if model == "empty_cleanup_root":
+                component = "VTextarea"
+                props.update({
+                    "rows": 3,
+                    "auto-grow": True,
+                    "placeholder": "/path/to/cleanup-root-1\n/path/to/cleanup-root-2",
+                })
+            content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": component, "props": props}]}]})
         return [{"component": "VForm", "content": content}], {
             "enabled": False, "notify_enabled": False, "detailed_logs": True,
             "empty_cleanup_enabled": False, "cookie": "",
