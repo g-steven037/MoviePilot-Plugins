@@ -2,11 +2,39 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
+from typing import Any
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat
 
 
-def _load_font(path: str, size: int, fallbacks: tuple[str, ...]):
+DEFAULT_RENDER_CONFIG: dict[str, Any] = {
+    "output_size": (1920, 1080),
+    "font_zh_path": "", "font_en_path": "",
+    "output_format": "jpg", "jpeg_quality": 92,
+    "s1_text_pos_zh": (100, 100), "s1_text_pos_en": (110, 260),
+    "s1_font_size_zh": 150, "s1_font_size_en": 70,
+    "s1_en_letter_spacing": 10, "s1_en_line_spacing": 12,
+    "s1_poster_count": 6, "s1_poster_size": (280, 420),
+    "s1_poster_spacing": 20, "s1_poster_y_pos": 610,
+    "s1_background_blur_enable": False, "s1_blur_percent": 0,
+    "s1_overlay_alpha": 110, "s1_gradient_width": 1000,
+    "s1_gradient_max_alpha": 180, "s1_bottom_gradient_enable": True,
+    "s1_bottom_gradient_max_alpha": 155, "s1_snow_enable": True,
+    "s1_snow_density": 60, "s1_snow_radius_min": 2, "s1_snow_radius_max": 8,
+    "s1_snow_alpha_min": 120, "s1_snow_alpha_max": 200,
+    "s1_snow_seed": 20260708,
+    "s2_poster_count": 9, "s2_poster_size": (400, 600),
+    "s2_poster_spacing_x": 10, "s2_poster_spacing_y": 10,
+    "s2_poster_stagger": 180, "s2_poster_rotation": -15,
+    "s2_poster_center": (1600, 540), "s2_text_pos": (100, 390),
+    "s2_font_size_zh": 180, "s2_font_size_en": 50,
+    "s2_en_letter_spacing": 6, "s2_en_line_spacing": 12,
+    "s2_accent_bar_enable": True, "s2_accent_bar_color": (255, 140, 0),
+    "s2_bg_auto_color": True, "s2_bg_default_color": (30, 30, 35),
+}
+
+
+def _font(path: str, size: int, fallbacks: tuple[str, ...]):
     for candidate in (path, *fallbacks):
         if candidate and Path(candidate).is_file():
             try:
@@ -28,7 +56,7 @@ def _rounded(image: Image.Image, size: tuple[int, int], radius: int = 8) -> Imag
     return poster
 
 
-def _multiline(draw, xy, text: str, font, fill, spacing: int = 12, letter_spacing: int = 0):
+def _multiline(draw, xy, text: str, font, fill, spacing: int, letter_spacing: int):
     x, y = xy
     for line in text.splitlines():
         cursor = x
@@ -40,124 +68,133 @@ def _multiline(draw, xy, text: str, font, fill, spacing: int = 12, letter_spacin
 
 
 class CoverRenderer:
-    SIZE = (1920, 1080)
+    def __init__(self, config: dict[str, Any] | None = None):
+        self.config = {**DEFAULT_RENDER_CONFIG, **(config or {})}
+        self.size = tuple(self.config["output_size"])
 
-    def __init__(self, font_zh: str = "", font_en: str = "", output_format: str = "jpg", quality: int = 92):
-        self.font_zh = font_zh
-        self.font_en = font_en
-        self.output_format = output_format
-        self.quality = max(70, min(int(quality), 100))
+    def poster_count(self, style: str) -> int:
+        return int(self.config["s2_poster_count"] if style == "style_2" else self.config["s1_poster_count"])
 
-    def render(
-        self,
-        style: str,
-        title: dict[str, str],
-        posters: list[Image.Image],
-        backdrop: Image.Image | None,
-        output_path: Path,
-    ) -> Path:
+    def render(self, style: str, title: dict[str, str], posters: list[Image.Image], backdrop: Image.Image | None, output_path: Path) -> Path:
         if not posters:
             raise ValueError("POSTERS_EMPTY")
         image = self._style_2(title, posters) if style == "style_2" else self._style_1(title, posters, backdrop)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        if self.output_format == "png":
+        if self.config["output_format"] == "png":
             image.save(output_path, "PNG", optimize=True)
         else:
-            image.convert("RGB").save(output_path, "JPEG", quality=self.quality, optimize=True)
+            image.convert("RGB").save(
+                output_path, "JPEG", quality=int(self.config["jpeg_quality"]), optimize=True
+            )
         return output_path
 
     def _fonts(self, zh_size: int, en_size: int):
-        zh = _load_font(self.font_zh, zh_size, (
+        zh = _font(self.config["font_zh_path"], zh_size, (
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
             "C:/Windows/Fonts/simhei.ttf",
         ))
-        en = _load_font(self.font_en, en_size, (
+        en = _font(self.config["font_en_path"], en_size, (
             "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
             "C:/Windows/Fonts/arialbd.ttf",
         ))
         return zh, en
 
     def _style_1(self, title: dict[str, str], posters: list[Image.Image], backdrop: Image.Image | None) -> Image.Image:
-        base = _fit(backdrop or posters[0], self.SIZE).convert("RGBA")
-        base.alpha_composite(Image.new("RGBA", self.SIZE, (0, 0, 0, 110)))
-        self._left_gradient(base, 1000, 180)
-        self._bottom_gradient(base, 155)
-        self._snow(base)
-        draw = ImageDraw.Draw(base)
-        zh_font, en_font = self._fonts(150, 70)
-        draw.text((100, 100), title["zh"], font=zh_font, fill=(255, 255, 255, 245))
-        _multiline(draw, (110, 260), title["en"], en_font, (255, 255, 255, 238), 12, 10)
-
-        poster_size = (280, 420)
-        selected = posters[:6]
-        width = len(selected) * poster_size[0] + max(0, len(selected) - 1) * 20
-        start_x = max(40, (self.SIZE[0] - width) // 2)
+        c = self.config
+        base = _fit(backdrop or posters[0], self.size)
+        if c["s1_background_blur_enable"]:
+            base = base.filter(ImageFilter.GaussianBlur(max(0, int(c["s1_blur_percent"] / 100 * 40))))
+        canvas = base.convert("RGBA")
+        canvas.alpha_composite(Image.new("RGBA", self.size, (0, 0, 0, c["s1_overlay_alpha"])))
+        self._left_gradient(canvas, c["s1_gradient_width"], c["s1_gradient_max_alpha"])
+        if c["s1_bottom_gradient_enable"]:
+            self._bottom_gradient(canvas, c["s1_bottom_gradient_max_alpha"])
+        if c["s1_snow_enable"]:
+            self._snow(canvas)
+        draw = ImageDraw.Draw(canvas)
+        zh_font, en_font = self._fonts(c["s1_font_size_zh"], c["s1_font_size_en"])
+        draw.text(c["s1_text_pos_zh"], title["zh"], font=zh_font, fill=(255, 255, 255, 245))
+        _multiline(draw, c["s1_text_pos_en"], title["en"], en_font, (255, 255, 255, 238), c["s1_en_line_spacing"], c["s1_en_letter_spacing"])
+        size = tuple(c["s1_poster_size"])
+        selected = posters[:c["s1_poster_count"]]
+        width = len(selected) * size[0] + max(0, len(selected) - 1) * c["s1_poster_spacing"]
+        start_x = max(0, (self.size[0] - width) // 2)
         for index, poster in enumerate(selected):
-            x = start_x + index * 300
-            base.alpha_composite(self._shadow(poster_size, 10, 45), (x - 10, 604))
-            base.alpha_composite(_rounded(poster, poster_size), (x, 610))
-        return base.convert("RGB")
+            x = start_x + index * (size[0] + c["s1_poster_spacing"])
+            y = c["s1_poster_y_pos"]
+            canvas.alpha_composite(self._shadow(size, 10, 45), (x - 10, y - 6))
+            canvas.alpha_composite(_rounded(poster, size), (x, y))
+        return canvas.convert("RGB")
 
     def _style_2(self, title: dict[str, str], posters: list[Image.Image]) -> Image.Image:
-        color = self._dominant(posters[0])
-        canvas = Image.new("RGBA", self.SIZE, color + (255,))
-        canvas.alpha_composite(Image.new("RGBA", self.SIZE, (0, 0, 0, 70)))
+        c = self.config
+        color = self._dominant(posters[0]) if c["s2_bg_auto_color"] else tuple(c["s2_bg_default_color"])
+        canvas = Image.new("RGBA", self.size, color + (255,))
+        canvas.alpha_composite(Image.new("RGBA", self.size, (0, 0, 0, 70)))
         wall = self._poster_wall(posters)
-        rotated = wall.rotate(-15, expand=True, resample=Image.Resampling.BICUBIC)
-        canvas.alpha_composite(rotated, (int(1600 - rotated.width / 2), int(540 - rotated.height / 2)))
-
+        rotated = wall.rotate(c["s2_poster_rotation"], expand=True, resample=Image.Resampling.BICUBIC)
+        cx, cy = c["s2_poster_center"]
+        canvas.alpha_composite(rotated, (int(cx - rotated.width / 2), int(cy - rotated.height / 2)))
         draw = ImageDraw.Draw(canvas)
-        zh_font, en_font = self._fonts(180, 50)
-        x, y = 100, 390
+        zh_font, en_font = self._fonts(c["s2_font_size_zh"], c["s2_font_size_en"])
+        x, y = c["s2_text_pos"]
         draw.text((x, y), title["zh"], font=zh_font, fill=(255, 255, 255, 245))
         box = draw.textbbox((x, y), title["zh"], font=zh_font)
         en_y = box[3] + 24
-        draw.rounded_rectangle((x, en_y + 4, x + 10, en_y + 110), radius=5, fill=(255, 140, 0, 255))
-        _multiline(draw, (x + 28, en_y), title["en"], en_font, (255, 255, 255, 225), 12, 6)
+        if c["s2_accent_bar_enable"]:
+            draw.rounded_rectangle((x, en_y + 4, x + 10, en_y + 110), radius=5, fill=tuple(c["s2_accent_bar_color"]) + (255,))
+            x += 28
+        _multiline(draw, (x, en_y), title["en"], en_font, (255, 255, 255, 225), c["s2_en_line_spacing"], c["s2_en_letter_spacing"])
         return canvas.convert("RGB")
 
     def _poster_wall(self, posters: list[Image.Image]) -> Image.Image:
-        size, sx, sy, stagger = (400, 600), 10, 10, 180
-        wall = Image.new("RGBA", (3 * size[0] + 2 * sx + 80, 3 * size[1] + 2 * sy + 2 * stagger + 80), (0, 0, 0, 0))
-        for index, poster in enumerate(posters[:9]):
-            col, row = index % 3, index // 3
-            x = 40 + col * (size[0] + sx)
-            y = 40 + row * (size[1] + sy) + col * stagger
+        c = self.config
+        size = tuple(c["s2_poster_size"])
+        count = c["s2_poster_count"]
+        cols, rows = 3, max(1, (count + 2) // 3)
+        width = cols * size[0] + (cols - 1) * c["s2_poster_spacing_x"]
+        height = rows * size[1] + (rows - 1) * c["s2_poster_spacing_y"] + c["s2_poster_stagger"] * (cols - 1)
+        wall = Image.new("RGBA", (width + 80, height + 80), (0, 0, 0, 0))
+        for index, poster in enumerate(posters[:count]):
+            col, row = index % cols, index // cols
+            x = 40 + col * (size[0] + c["s2_poster_spacing_x"])
+            y = 40 + row * (size[1] + c["s2_poster_spacing_y"]) + col * c["s2_poster_stagger"]
             wall.alpha_composite(self._shadow(size, 16, 70), (x - 16, y - 8))
             wall.alpha_composite(_rounded(poster, size, 6), (x, y))
         return wall
 
     def _left_gradient(self, canvas: Image.Image, width: int, max_alpha: int):
-        layer = Image.new("RGBA", self.SIZE, (0, 0, 0, 0))
+        width = max(1, min(width, self.size[0]))
+        layer = Image.new("RGBA", self.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(layer)
         for x in range(width):
-            draw.line((x, 0, x, self.SIZE[1]), fill=(0, 0, 0, int(max_alpha * (1 - x / width) ** 1.4)))
+            draw.line((x, 0, x, self.size[1]), fill=(0, 0, 0, int(max_alpha * (1 - x / width) ** 1.4)))
         canvas.alpha_composite(layer)
 
     def _bottom_gradient(self, canvas: Image.Image, max_alpha: int):
-        layer = Image.new("RGBA", self.SIZE, (0, 0, 0, 0))
+        layer = Image.new("RGBA", self.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(layer)
-        start = self.SIZE[1] // 2
-        for y in range(start, self.SIZE[1]):
-            alpha = int(max_alpha * ((y - start) / (self.SIZE[1] - start)) ** 1.7)
-            draw.line((0, y, self.SIZE[0], y), fill=(0, 0, 0, alpha))
+        start = self.size[1] // 2
+        for y in range(start, self.size[1]):
+            alpha = int(max_alpha * ((y - start) / max(1, self.size[1] - start)) ** 1.7)
+            draw.line((0, y, self.size[0], y), fill=(0, 0, 0, alpha))
         canvas.alpha_composite(layer)
 
     def _snow(self, canvas: Image.Image):
+        c = self.config
         draw = ImageDraw.Draw(canvas)
-        rng = random.Random(20260708)
-        for _ in range(200):
-            x, y, radius = rng.randint(0, self.SIZE[0]), rng.randint(0, self.SIZE[1]), rng.randint(2, 11)
-            alpha = rng.randint(60, 190)
+        rng = random.Random(c["s1_snow_seed"])
+        for _ in range(c["s1_snow_density"]):
+            x, y = rng.randint(0, self.size[0]), rng.randint(0, self.size[1])
+            radius = rng.randint(c["s1_snow_radius_min"], c["s1_snow_radius_max"])
+            alpha = rng.randint(c["s1_snow_alpha_min"], c["s1_snow_alpha_max"])
             draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=(235, 245, 248, alpha))
 
     @staticmethod
     def _shadow(size: tuple[int, int], blur: int, alpha: int) -> Image.Image:
         shadow = Image.new("RGBA", (size[0] + blur * 2, size[1] + blur * 2), (0, 0, 0, 0))
-        ImageDraw.Draw(shadow).rounded_rectangle(
-            (blur, blur, blur + size[0], blur + size[1]), radius=10, fill=(0, 0, 0, alpha)
-        )
+        ImageDraw.Draw(shadow).rounded_rectangle((blur, blur, blur + size[0], blur + size[1]), radius=10, fill=(0, 0, 0, alpha))
         return shadow.filter(ImageFilter.GaussianBlur(blur))
 
     @staticmethod
