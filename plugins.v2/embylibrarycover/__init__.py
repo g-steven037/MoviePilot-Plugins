@@ -25,7 +25,7 @@ class EmbyLibraryCover(_PluginBase):
     plugin_name = "Emby媒体库封面"
     plugin_desc = "根据Emby最新媒体海报生成横版媒体库封面，可按Cron定时生成并选择性上传覆盖，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/emby-library-cover.svg"
-    plugin_version = "0.1.2"
+    plugin_version = "0.1.3"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "embylibrarycover_"
@@ -69,17 +69,26 @@ class EmbyLibraryCover(_PluginBase):
             font_en = self._prepare_font(config.get("font_en_path", ""))
             self._upload_enabled = bool(config.get("upload_enabled", False))
             self._renderer = CoverRenderer(font_zh, font_en, self._output_format, quality)
+            if bool(config.get("use_mp_config", True)):
+                emby_url, api_key, user_id, server_name = self._load_moviepilot_emby(
+                    str(config.get("media_server", "")).strip()
+                )
+                logger.info(f"#Emby媒体库封面# 使用MoviePilot媒体服务器配置 | 名称={self._safe_log(server_name)}")
+            else:
+                emby_url = config.get("emby_url", "")
+                api_key = config.get("api_key", "")
+                user_id = str(config.get("user_id", "")).strip()
             self._client = EmbyClient(
-                base_url=config.get("emby_url", ""),
-                api_key=config.get("api_key", ""),
-                user_id=str(config.get("user_id", "")).strip(),
+                base_url=emby_url,
+                api_key=api_key,
+                user_id=user_id,
                 timeout=timeout,
                 verify_ssl=bool(config.get("verify_ssl", True)),
                 verify_upload=bool(config.get("verify_upload", False)),
                 upload_target=str(config.get("upload_target", "item")).strip(),
                 stop_event=self._stop_event,
             )
-            if str(config.get("emby_url", "")).lower().startswith("https://") and not bool(config.get("verify_ssl", True)):
+            if str(emby_url).lower().startswith("https://") and not bool(config.get("verify_ssl", True)):
                 logger.warning("#Emby媒体库封面# HTTPS证书校验已关闭，请仅在可信内网中使用")
             if bool(config.get("run_once", False)):
                 config["run_once"] = False
@@ -142,6 +151,53 @@ class EmbyLibraryCover(_PluginBase):
         if not result:
             raise ValueError("LIBRARY_MAP_EMPTY")
         return result
+
+    @staticmethod
+    def _resolve_moviepilot_emby(helper: Any, selected_name: str = "") -> Tuple[str, str, str, str]:
+        services = helper.get_services(type_filter="emby") or {}
+        configs = helper.get_configs() or {}
+        candidates = sorted(
+            name for name, conf in configs.items()
+            if str(getattr(conf, "type", "")).lower() == "emby"
+        )
+        if not candidates:
+            raise ValueError("MP_EMBY_NOT_FOUND")
+        name = selected_name or candidates[0]
+        if name not in candidates:
+            raise ValueError("MP_EMBY_NOT_FOUND")
+        service = services.get(name)
+        conf = getattr(service, "config", None) if service else configs.get(name)
+        values = getattr(conf, "config", None) or {}
+        if not isinstance(values, dict):
+            raise ValueError("MP_EMBY_CONFIG_INVALID")
+        host = str(values.get("host") or "").strip()
+        api_key = str(values.get("apikey") or "").strip()
+        instance = getattr(service, "instance", None) if service else None
+        user_id = str(getattr(instance, "user", "") or "").strip()
+        if not host or not api_key:
+            raise ValueError("MP_EMBY_CONFIG_INCOMPLETE")
+        return host, api_key, user_id, name
+
+    @classmethod
+    def _load_moviepilot_emby(cls, selected_name: str = "") -> Tuple[str, str, str, str]:
+        try:
+            from app.helper.mediaserver import MediaServerHelper
+            return cls._resolve_moviepilot_emby(MediaServerHelper(), selected_name)
+        except (ImportError, AttributeError) as exc:
+            raise ValueError("MP_EMBY_HELPER_UNAVAILABLE") from exc
+
+    @staticmethod
+    def _moviepilot_emby_items() -> List[Dict[str, str]]:
+        try:
+            from app.helper.mediaserver import MediaServerHelper
+            configs = MediaServerHelper().get_configs() or {}
+            names = sorted(
+                name for name, conf in configs.items()
+                if str(getattr(conf, "type", "")).lower() == "emby"
+            )
+            return [{"title": name, "value": name} for name in names]
+        except Exception:
+            return []
 
     @staticmethod
     def _default_output_dir() -> Path:
@@ -285,11 +341,12 @@ class EmbyLibraryCover(_PluginBase):
             "component": "VAlert",
             "props": {
                 "type": "warning", "variant": "tonal",
-                "text": "Emby API Key以密码框填写，仅发送到所填Emby地址且不写入日志；MoviePilot仍会将其保存在自身配置中。默认只生成图片，不上传覆盖。",
+                "text": "默认读取MoviePilot中已启用的Emby地址、API Key和用户ID，不复制到插件配置或日志；关闭自动读取后才使用下方手动参数。默认只生成图片，不上传覆盖。",
             },
         }
         switches = [
             ("enabled", "插件启用"), ("run_once", "立即运行一次"),
+            ("use_mp_config", "使用MoviePilot的Emby配置"),
             ("upload_enabled", "上传覆盖Emby封面"), ("verify_upload", "上传后验证"),
             ("verify_ssl", "校验HTTPS证书"),
         ]
@@ -300,9 +357,9 @@ class EmbyLibraryCover(_PluginBase):
             ]} for model, label in switches
         ]})
         fields = [
-            ("emby_url", "Emby地址，例如 http://emby:8096", "text"),
-            ("api_key", "Emby API Key", "password"),
-            ("user_id", "Emby用户ID（可留空自动获取）", "text"),
+            ("emby_url", "手动Emby地址（关闭自动读取时使用）", "text"),
+            ("api_key", "手动Emby API Key（关闭自动读取时使用）", "password"),
+            ("user_id", "手动Emby用户ID（可留空自动获取）", "text"),
             ("cron", "生成计划 Cron（5段）", "text"),
             ("output_dir", "输出目录（留空使用MoviePilot配置目录）", "text"),
             ("font_zh_path", "中文字体绝对路径（可留空）", "text"),
@@ -318,6 +375,7 @@ class EmbyLibraryCover(_PluginBase):
                 {"component": "VTextField", "props": props}
             ]}]})
         selects = [
+            ("media_server", "MoviePilot中的Emby服务器（留空自动选择第一个）", self._moviepilot_emby_items()),
             ("style", "封面样式", [("经典横排", "style_1"), ("倾斜海报墙", "style_2")]),
             ("output_format", "输出格式", [("JPG", "jpg"), ("PNG", "png")]),
             ("upload_target", "上传目标", [("媒体库ItemId", "item"), ("虚拟媒体库", "virtual_folder"), ("两者", "both")]),
@@ -337,7 +395,8 @@ class EmbyLibraryCover(_PluginBase):
             }}
         ]}]})
         return [{"component": "VForm", "content": content}], {
-            "enabled": False, "run_once": False,
+            "enabled": False, "run_once": False, "use_mp_config": True,
+            "media_server": "",
             "emby_url": "", "api_key": "", "user_id": "",
             "cron": "0 3 * * *", "library_map": DEFAULT_LIBRARY_MAP,
             "style": "style_1", "output_format": "jpg", "jpeg_quality": 92,
