@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import queue
 import re
+import stat
 import threading
 from datetime import datetime
 from hashlib import sha256
@@ -55,9 +56,9 @@ class _WatchHandler(FileSystemEventHandler):
 
 class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
-    plugin_desc = "安全监控硬链接目录，未命中秒传时原子移入临时目录并限速重试"
+    plugin_desc = "监控硬链接目录，未命中秒传时转移到临时目录，并定时重试；秒传成功后删除本地文件，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "0.6.0"
+    plugin_version = "0.8.0"
     plugin_author = "115-transmission"
     author_url = "https://github.com"
     plugin_config_prefix = "p115rapidretry_"
@@ -74,6 +75,7 @@ class P115RapidRetry(_PluginBase):
     _max_batch = 10
     _max_retries = 10
     _notify_enabled = False
+    _detailed_logs = True
     _client: Optional[P115Client] = None
     _observer: Optional[Observer] = None
     _worker: Optional[threading.Thread] = None
@@ -103,6 +105,9 @@ class P115RapidRetry(_PluginBase):
             self._max_batch = self._bounded_int(config.get("max_batch", 10), 1, 100)
             self._max_retries = self._bounded_int(config.get("max_retries", 10), 1, 100)
             self._notify_enabled = bool(config.get("notify_enabled", False))
+            self._detailed_logs = bool(
+                config.get("detailed_logs", str(config.get("log_mode", "detailed")).strip().lower() == "detailed")
+            )
             self._target_pid = self._validate_pid(str(config.get("target_pid", "0")).strip())
             self._watch_dir = self._prepare_path(config.get("watch_dir"), create=True)
             self._retry_dir = self._prepare_path(config.get("retry_dir"), create=True)
@@ -294,9 +299,10 @@ class P115RapidRetry(_PluginBase):
                 if not bool(state.get(self._task_id(path, self._retry_dir), {}).get("exhausted", False))
                 and float(state.get(self._task_id(path, self._retry_dir), {}).get("next_at", 0)) <= time()
             ]
-            logger.info(
-                f"#115秒传# 临时目录扫描完成，共发现 {len(files)} 个文件，本轮提交 {min(len(eligible), self._max_batch)} 个重试任务"
-            )
+            if self._detailed_logs:
+                logger.info(
+                    f"#115秒传# 临时目录扫描完成，共发现 {len(files)} 个文件，本轮提交 {min(len(eligible), self._max_batch)} 个重试任务"
+                )
             processed = 0
             for path in files:
                 task_id = self._task_id(path, self._retry_dir)
@@ -309,7 +315,6 @@ class P115RapidRetry(_PluginBase):
                 processed += 1
                 if processed >= self._max_batch or self._auth_blocked or time() < self._circuit_until:
                     break
-            self._remove_empty_dirs(self._retry_dir)
         finally:
             self._operation_lock.release()
 
@@ -331,7 +336,10 @@ class P115RapidRetry(_PluginBase):
         task_id = self._task_id(path, root)
         source = "重试" if from_retry else "后台线程"
         filename = self._safe_log_value(path.name)
-        logger.info(f"#115秒传# [{source}-{threading.current_thread().name}] {'重试秒传' if from_retry else '开始秒传'}: {filename}")
+        retry_state = (self.get_data("retry_state") or {}).get(task_id, {})
+        attempt_no = int(retry_state.get("attempts", 0)) + 1 if from_retry else 0
+        if self._detailed_logs:
+            logger.info(f"#115秒传# [{source}-{threading.current_thread().name}] {'重试秒传' if from_retry else '开始秒传'}: {filename}")
         if self._auth_blocked or time() < self._circuit_until:
             result = RapidResult(False, True, "CIRCUIT_OPEN", identity)
         else:
@@ -344,6 +352,8 @@ class P115RapidRetry(_PluginBase):
             known_sha1 = self._sha1_cache.get(cache_identity) if cache_identity else None
 
             def progress(event: str):
+                if not self._detailed_logs:
+                    return
                 if event == "SHA1_START":
                     logger.info(f"#115秒传# 开始计算SHA1: {filename}")
                 elif event == "SHA1_DONE":
@@ -363,7 +373,7 @@ class P115RapidRetry(_PluginBase):
                 self._sha1_cache.clear()
             self._sha1_cache[identity] = result.sha1
         self._record(task_id, result.success, result.code)
-        self._audit_rapid(path, root, result, from_retry)
+        self._audit_rapid(path, root, result, from_retry, attempt_no)
 
         if result.code == "AUTH_FAILED":
             self._auth_blocked = True
@@ -375,14 +385,19 @@ class P115RapidRetry(_PluginBase):
                 self._clear_retry_state(task_id)
                 self._sha1_cache.pop(identity, None)
                 if from_retry:
-                    logger.info(f"#115秒传# 重试秒传成功后删除源文件: {filename}")
-                    logger.info(f"#115秒传# [重试-{threading.current_thread().name}] 重试成功: {filename}")
+                    if self._detailed_logs:
+                        logger.info(f"#115秒传# 重试秒传成功后删除源文件: {filename}")
+                        logger.info(f"#115秒传# [重试-{threading.current_thread().name}] 重试成功: {filename}")
                 else:
-                    logger.info(f"#115秒传# 秒传成功后删除硬链接文件: {filename}")
+                    if self._detailed_logs:
+                        logger.info(f"#115秒传# 秒传成功后删除硬链接文件: {filename}")
                 self._send_bot_success(path, from_retry, cleanup_success=True)
+                self._remove_empty_parent_dirs(path.parent, root)
             else:
                 self._record(task_id, False, "FILE_CHANGED")
-                logger.warning(f"#115秒传# 秒传成功但本地文件身份变化，未删除: {filename}")
+                logger.warning(
+                    f"#115秒传# {'秒传成功但本地文件身份变化，未删除' if self._detailed_logs else '[简短] 本地清理失败'}: {filename}"
+                )
                 self._send_bot_success(path, from_retry, cleanup_success=False)
             return
 
@@ -391,7 +406,8 @@ class P115RapidRetry(_PluginBase):
             if exhausted:
                 self._record(task_id, False, "RETRY_EXHAUSTED")
                 logger.warning(
-                    f"#115秒传# 已达到最大重试次数({attempts})，停止自动重试并保留文件: {filename}"
+                    f"#115秒传# {'已达到最大重试次数' if self._detailed_logs else '[简短] 重试已达上限'}"
+                    f"({attempts}/{self._max_retries})，停止自动重试并保留文件: {filename}"
                 )
                 self._send_bot_exhausted(path, attempts, result.code)
             return
@@ -417,8 +433,14 @@ class P115RapidRetry(_PluginBase):
                 self._record(task_id, False, "FILE_CHANGED")
                 return
             self._initialize_retry(self._task_id(destination, self._retry_dir), "RAPID_MISS")
-            logger.info(f"#115秒传# 文件已移动到临时目录: {self._safe_log_value(destination)}")
-            logger.info(f"#115秒传# [后台线程-{threading.current_thread().name}] 文件处理完成(移至临时目录): {self._safe_log_value(destination.name)}")
+            if self._detailed_logs:
+                logger.info(f"#115秒传# 文件已移动到临时目录: {self._safe_log_value(destination)}")
+                logger.info(f"#115秒传# [后台线程-{threading.current_thread().name}] 文件处理完成(移至临时目录): {self._safe_log_value(destination.name)}")
+            else:
+                logger.info(
+                    f"#115秒传# [简短] 已转移临时文件夹 | 文件={self._safe_log_value(destination.name)} | "
+                    f"临时目录={self._safe_log_value(destination.parent)}"
+                )
         except (OSError, ValueError):
             self._record(task_id, False, "MOVE_FAILED")
             logger.warning(f"#115秒传# 移动到临时目录失败: {self._safe_log_value(path.name)}")
@@ -545,7 +567,15 @@ class P115RapidRetry(_PluginBase):
         text = "".join(char if ord(char) >= 0x20 and ord(char) != 0x7F else "?" for char in str(value))
         return text[:limit]
 
-    def _audit_rapid(self, path: Path, root: Path, result: RapidResult, from_retry: bool):
+    def _audit_rapid(self, path: Path, root: Path, result: RapidResult, from_retry: bool, attempt_no: int = 0):
+        if not self._detailed_logs:
+            brief_status = "成功" if result.success else ("未命中" if result.code == "RAPID_MISS" else "失败")
+            message = (
+                f"#115秒传# [简短] 秒传状态={brief_status} | 文件={self._safe_log_value(path.name)} | "
+                f"重试次数={attempt_no}/{self._max_retries} | 代码={self._normalize_code(result.code)}"
+            )
+            (logger.info if result.success else logger.warning)(message)
+            return
         if result.success:
             status, matched = "成功", "是"
         elif result.code == "RAPID_MISS":
@@ -571,17 +601,28 @@ class P115RapidRetry(_PluginBase):
         else:
             logger.warning(message)
 
-    @staticmethod
-    def _remove_empty_dirs(root: Path):
+    def _remove_empty_parent_dirs(self, start: Path, root: Path):
         try:
-            directories = (path for path in root.rglob("*") if path.is_dir() and not path.is_symlink())
-            for directory in sorted(directories, key=lambda value: len(value.parts), reverse=True):
-                try:
-                    directory.rmdir()
-                except OSError:
-                    pass
-        except OSError:
-            pass
+            root_resolved = root.resolve(strict=True)
+            current = start
+            while True:
+                resolved = current.resolve(strict=True)
+                if resolved == root_resolved or not resolved.is_relative_to(root_resolved):
+                    break
+                value = current.lstat()
+                attributes = getattr(value, "st_file_attributes", 0)
+                reparse_marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode) or bool(attributes & reparse_marker):
+                    break
+                parent = resolved.parent
+                current.rmdir()
+                if self._detailed_logs:
+                    logger.info(f"#115秒传# 已删除空文件夹: {self._safe_log_value(resolved)}")
+                else:
+                    logger.info(f"#115秒传# [简短] 已删除空文件夹 | 文件夹={self._safe_log_value(resolved)}")
+                current = parent
+        except (OSError, ValueError):
+            return
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         fields = [
@@ -599,6 +640,7 @@ class P115RapidRetry(_PluginBase):
         content.append({"component": "VRow", "content": [
             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "插件启用"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "notify_enabled", "label": "Bot通知"}}]},
+            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "detailed_logs", "label": "详细日志"}}]},
         ]})
         for model, label, field_type in fields:
             props = {"model": model, "label": label, "clearable": False}
@@ -608,7 +650,7 @@ class P115RapidRetry(_PluginBase):
                 props["autocomplete"] = "new-password"
             content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": props}]}]})
         return [{"component": "VForm", "content": content}], {
-            "enabled": False, "notify_enabled": False, "cookie": "",
+            "enabled": False, "notify_enabled": False, "detailed_logs": True, "cookie": "",
             "protected_pt_dir": "", "watch_dir": "", "retry_dir": "", "target_pid": "0",
             "cron": "*/10 * * * *", "stable_seconds": 10, "max_batch": 10, "max_retries": 10,
         }
