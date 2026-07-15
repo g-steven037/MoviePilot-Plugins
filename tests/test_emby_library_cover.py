@@ -12,7 +12,7 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 
 from embylibrarycover import DEFAULT_LIBRARY_MAP, EmbyLibraryCover
 from embylibrarycover.client import EmbyClient, EmbyError, validate_base_url
-from embylibrarycover.renderer import CoverRenderer
+from embylibrarycover.renderer import CoverRenderer, DEFAULT_RENDER_CONFIG
 from PIL import Image, ImageFont
 
 
@@ -94,11 +94,23 @@ def test_form_defaults_to_generation_only_and_password_field():
     assert "'model': 'api_key'" in serialized
     assert "'type': 'password'" in serialized
     for model in (
-        "s1_snow_density", "s1_overlay_alpha", "s1_poster_width",
-        "s2_poster_rotation", "s2_accent_bar_color", "output_width",
-        "schedule_time", "update_interval_hours",
+        "s1_snow_density", "s1_overlay_alpha", "s2_poster_rotation",
+        "s2_accent_bar_color", "output_width", "cron",
     ):
         assert f"'model': '{model}'" in serialized
+    for removed in (
+        "schedule_time", "update_interval_hours", "upload_target",
+        "s1_text_pos_zh_x", "s1_text_pos_en_y", "s1_en_letter_spacing",
+        "s1_poster_width", "s1_poster_height", "s2_text_pos_x",
+        "s2_en_letter_spacing", "s2_poster_width", "s2_poster_height",
+        "s1_background_blur_enable", "s1_bottom_gradient_enable",
+        "s1_snow_enable", "s1_blur_percent", "s2_accent_bar_enable", "s2_bg_auto_color",
+    ):
+        assert f"'model': '{removed}'" not in serialized
+        assert removed not in defaults
+    assert "'show': '{{use_mp_config}}'" in serialized
+    assert "'show': '{{!use_mp_config}}'" in serialized
+    assert "'show': '{{upload_enabled}}'" in serialized
 
 
 def test_moviepilot_emby_config_is_resolved_without_copying_secrets():
@@ -184,6 +196,22 @@ def test_visual_config_is_validated_and_applied():
     assert config["output_size"] == (1280, 720)
     assert config["s1_snow_density"] == 60
     assert config["s2_accent_bar_color"] == (255, 140, 0)
+    migrated = EmbyLibraryCover._build_render_config({
+        "s1_text_pos_zh_x": 999, "s1_text_pos_en_y": 999,
+        "s1_en_letter_spacing": 99, "s1_poster_width": 999,
+        "s2_text_pos_x": 999, "s2_en_letter_spacing": 99,
+        "s2_poster_height": 999, "s1_background_blur_enable": True,
+        "s1_bottom_gradient_enable": False, "s1_snow_enable": False,
+        "s2_accent_bar_enable": False, "s2_bg_auto_color": False,
+    }, "", "")
+    for key in (
+        "s1_text_pos_zh", "s1_text_pos_en", "s1_en_letter_spacing",
+        "s1_poster_size", "s2_text_pos", "s2_en_letter_spacing",
+        "s2_poster_size", "s1_background_blur_enable",
+        "s1_bottom_gradient_enable", "s1_snow_enable",
+        "s2_accent_bar_enable", "s2_bg_auto_color",
+    ):
+        assert migrated[key] == DEFAULT_RENDER_CONFIG[key]
     for unsafe in (
         {"output_width": 99999},
         {"s1_snow_radius_min": 9, "s1_snow_radius_max": 8},

@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
 
 from app.core.config import settings
 from app.log import logger
@@ -38,7 +37,7 @@ class EmbyLibraryCover(_PluginBase):
     plugin_name = "Emby媒体库封面"
     plugin_desc = "根据Emby最新媒体海报生成横版媒体库封面，可按Cron定时生成并选择性上传覆盖，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/emby-library-cover.svg"
-    plugin_version = "0.1.6"
+    plugin_version = "0.1.7"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "embylibrarycover_"
@@ -47,8 +46,6 @@ class EmbyLibraryCover(_PluginBase):
 
     _enabled = False
     _cron = "0 3 * * *"
-    _schedule_time = ""
-    _update_interval_hours = 0.0
     _client: Optional[EmbyClient] = None
     _thread: Optional[threading.Thread] = None
     _stop_event = threading.Event()
@@ -69,12 +66,7 @@ class EmbyLibraryCover(_PluginBase):
         self._stop_event = threading.Event()
         try:
             self._cron = str(config.get("cron", "0 3 * * *")).strip()
-            self._schedule_time = self._validate_schedule_time(config.get("schedule_time", ""))
-            self._update_interval_hours = self._bounded_float(config.get("update_interval_hours", 0), 0, 168)
-            if 0 < self._update_interval_hours < 0.25:
-                raise ValueError("INTERVAL_TOO_SHORT")
-            if not self._schedule_time and self._update_interval_hours <= 0:
-                CronTrigger.from_crontab(self._cron)
+            CronTrigger.from_crontab(self._cron)
             self._library_map = self._parse_library_map(config.get("library_map", DEFAULT_LIBRARY_MAP))
             self._style = str(config.get("style", "style_1")).strip()
             if self._style not in {"style_1", "style_2"}:
@@ -104,7 +96,7 @@ class EmbyLibraryCover(_PluginBase):
                 timeout=timeout,
                 verify_ssl=bool(config.get("verify_ssl", True)),
                 verify_upload=bool(config.get("verify_upload", False)),
-                upload_target=str(config.get("upload_target", "item")).strip(),
+                upload_target="item",
                 stop_event=self._stop_event,
             )
             if str(emby_url).lower().startswith("https://") and not bool(config.get("verify_ssl", True)):
@@ -133,25 +125,6 @@ class EmbyLibraryCover(_PluginBase):
         return number
 
     @staticmethod
-    def _bounded_float(value: Any, minimum: float, maximum: float) -> float:
-        try:
-            number = float(value)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError("CONFIG_INVALID") from exc
-        if number != number or not minimum <= number <= maximum:
-            raise ValueError("CONFIG_OUT_OF_RANGE")
-        return number
-
-    @staticmethod
-    def _validate_schedule_time(value: Any) -> str:
-        text = str(value or "").strip()
-        if not text:
-            return ""
-        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", text):
-            raise ValueError("SCHEDULE_TIME_INVALID")
-        return text
-
-    @staticmethod
     def _parse_color(value: Any, default: Tuple[int, int, int]) -> Tuple[int, int, int]:
         text = str(value or "").strip()
         if not text:
@@ -178,9 +151,9 @@ class EmbyLibraryCover(_PluginBase):
 
         integer_specs = {
             "s1_font_size_zh": (8, 500), "s1_font_size_en": (8, 300),
-            "s1_en_letter_spacing": (0, 100), "s1_en_line_spacing": (0, 200),
+            "s1_en_line_spacing": (0, 200),
             "s1_poster_count": (1, 12), "s1_poster_spacing": (0, 500),
-            "s1_poster_y_pos": (-2160, 4320), "s1_blur_percent": (0, 100),
+            "s1_poster_y_pos": (-2160, 4320),
             "s1_overlay_alpha": (0, 255), "s1_gradient_width": (1, 3840),
             "s1_gradient_max_alpha": (0, 255), "s1_bottom_gradient_max_alpha": (0, 255),
             "s1_snow_density": (0, 5000), "s1_snow_radius_min": (1, 100),
@@ -189,19 +162,14 @@ class EmbyLibraryCover(_PluginBase):
             "s2_poster_count": (1, 12), "s2_poster_spacing_x": (0, 500),
             "s2_poster_spacing_y": (0, 500), "s2_poster_stagger": (-2000, 2000),
             "s2_poster_rotation": (-180, 180), "s2_font_size_zh": (8, 500),
-            "s2_font_size_en": (8, 300), "s2_en_letter_spacing": (0, 100),
+            "s2_font_size_en": (8, 300),
             "s2_en_line_spacing": (0, 200),
         }
         for key, bounds in integer_specs.items():
             result[key] = cls._bounded_int(config.get(key, result[key]), *bounds)
 
         pair_specs = {
-            "s1_text_pos_zh": ("s1_text_pos_zh_x", "s1_text_pos_zh_y", (100, 100)),
-            "s1_text_pos_en": ("s1_text_pos_en_x", "s1_text_pos_en_y", (110, 260)),
-            "s1_poster_size": ("s1_poster_width", "s1_poster_height", (280, 420)),
-            "s2_poster_size": ("s2_poster_width", "s2_poster_height", (400, 600)),
             "s2_poster_center": ("s2_poster_center_x", "s2_poster_center_y", (1600, 540)),
-            "s2_text_pos": ("s2_text_pos_x", "s2_text_pos_y", (100, 390)),
         }
         for key, (x_model, y_model, default) in pair_specs.items():
             if "size" in key:
@@ -212,11 +180,6 @@ class EmbyLibraryCover(_PluginBase):
                 y = cls._bounded_int(config.get(y_model, default[1]), -4096, 8192)
             result[key] = (x, y)
 
-        for key in (
-            "s1_background_blur_enable", "s1_bottom_gradient_enable", "s1_snow_enable",
-            "s2_accent_bar_enable", "s2_bg_auto_color",
-        ):
-            result[key] = bool(config.get(key, result[key]))
         result["s2_accent_bar_color"] = cls._parse_color(
             config.get("s2_accent_bar_color", "#FF8C00"), (255, 140, 0)
         )
@@ -387,19 +350,10 @@ class EmbyLibraryCover(_PluginBase):
     def get_service(self) -> Optional[List[Dict[str, Any]]]:
         if not self._enabled:
             return None
-        if self._schedule_time:
-            hour, minute = (int(value) for value in self._schedule_time.split(":"))
-            trigger = CronTrigger(hour=hour, minute=minute)
-            schedule_name = f"每天{self._schedule_time}"
-        elif self._update_interval_hours > 0:
-            trigger = IntervalTrigger(hours=self._update_interval_hours)
-            schedule_name = f"每{self._update_interval_hours:g}小时"
-        else:
-            trigger = CronTrigger.from_crontab(self._cron)
-            schedule_name = self._cron
+        trigger = CronTrigger.from_crontab(self._cron)
         return [{
             "id": "EmbyLibraryCover_generate",
-            "name": f"Emby媒体库封面定时生成（{schedule_name}）",
+            "name": f"Emby媒体库封面定时生成（{self._cron}）",
             "trigger": trigger,
             "func": self.generate_covers,
             "kwargs": {},
@@ -503,22 +457,20 @@ class EmbyLibraryCover(_PluginBase):
             ("use_mp_config", "使用MoviePilot的Emby配置"),
             ("upload_enabled", "上传覆盖Emby封面"), ("verify_upload", "上传后验证"),
             ("verify_ssl", "校验HTTPS证书"),
-            ("s1_background_blur_enable", "Style 1背景模糊"),
-            ("s1_bottom_gradient_enable", "Style 1底部渐变"),
-            ("s1_snow_enable", "Style 1雪花"),
-            ("s2_accent_bar_enable", "Style 2装饰条"),
-            ("s2_bg_auto_color", "Style 2自动取色"),
         ]
         content = [{"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [alert]}]}]
         content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{
             "component": "VAlert", "props": {"type": detected_type, "variant": "tonal", "text": detected_text}
         }]}]})
         content.append({"component": "VRow", "content": [
-            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+            {"component": "VCol", "props": {
+                "cols": 12, "md": 4,
+                **({"show": "{{upload_enabled}}"} if model == "verify_upload" else {}),
+            }, "content": [
                 {"component": "VSwitch", "props": {"model": model, "label": label}}
             ]} for model, label in switches
         ]})
-        content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{
+        content.append({"component": "VRow", "props": {"show": "{{use_mp_config}}"}, "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{
             "component": "VSelect", "props": {
                 "model": "media_server", "label": "MoviePilot中的Emby服务器（留空自动选择第一个）",
                 "clearable": True, "items": server_items,
@@ -529,8 +481,6 @@ class EmbyLibraryCover(_PluginBase):
             ("api_key", "手动Emby API Key（关闭自动读取时使用）", "password"),
             ("user_id", "手动Emby用户ID（可留空自动获取）", "text"),
             ("cron", "生成计划 Cron（5段）", "text"),
-            ("schedule_time", "每日运行时间（HH:MM，填写后优先于Cron）", "text"),
-            ("update_interval_hours", "循环间隔小时（0或0.25-168）", "number"),
             ("output_dir", "输出目录（留空使用MoviePilot配置目录）", "text"),
             ("font_zh_path", "中文字体绝对路径（留空使用内置Noto Sans SC）", "text"),
             ("font_en_path", "英文字体绝对路径（留空使用内置Noto Sans SC）", "text"),
@@ -543,13 +493,13 @@ class EmbyLibraryCover(_PluginBase):
             props = {"model": model, "label": label, "clearable": False, "type": field_type}
             if model == "api_key":
                 props["autocomplete"] = "new-password"
-            content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [
+            row_props = {"show": "{{!use_mp_config}}"} if model in {"emby_url", "api_key", "user_id"} else {}
+            content.append({"component": "VRow", "props": row_props, "content": [{"component": "VCol", "props": {"cols": 12}, "content": [
                 {"component": "VTextField", "props": props}
             ]}]})
         selects = [
             ("style", "封面样式", [("经典横排", "style_1"), ("倾斜海报墙", "style_2")]),
             ("output_format", "输出格式", [("JPG", "jpg"), ("PNG", "png")]),
-            ("upload_target", "上传目标", [("媒体库ItemId", "item"), ("虚拟媒体库", "virtual_folder"), ("两者", "both")]),
         ]
         for model, label, items in selects:
             content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [
@@ -560,13 +510,10 @@ class EmbyLibraryCover(_PluginBase):
             ]}]})
         visual_groups = [
             ("Style 1 经典横排参数", [
-                ("s1_text_pos_zh_x", "中文标题X"), ("s1_text_pos_zh_y", "中文标题Y"),
-                ("s1_text_pos_en_x", "英文标题X"), ("s1_text_pos_en_y", "英文标题Y"),
                 ("s1_font_size_zh", "中文字号"), ("s1_font_size_en", "英文字号"),
-                ("s1_en_letter_spacing", "英文字距"), ("s1_en_line_spacing", "英文行距"),
-                ("s1_poster_count", "海报数量"), ("s1_poster_width", "海报宽度"),
-                ("s1_poster_height", "海报高度"), ("s1_poster_spacing", "海报间距"),
-                ("s1_poster_y_pos", "海报Y坐标"), ("s1_blur_percent", "模糊强度%"),
+                ("s1_en_line_spacing", "英文行距"), ("s1_poster_count", "海报数量"),
+                ("s1_poster_spacing", "海报间距"),
+                ("s1_poster_y_pos", "海报Y坐标"),
                 ("s1_overlay_alpha", "全局遮罩透明度"), ("s1_gradient_width", "左侧渐变宽度"),
                 ("s1_gradient_max_alpha", "左侧渐变最大透明度"),
                 ("s1_bottom_gradient_max_alpha", "底部渐变最大透明度"),
@@ -575,13 +522,11 @@ class EmbyLibraryCover(_PluginBase):
                 ("s1_snow_alpha_max", "雪花最大透明度"), ("s1_snow_seed", "雪花随机种子"),
             ]),
             ("Style 2 倾斜海报墙参数", [
-                ("s2_poster_count", "海报数量"), ("s2_poster_width", "海报宽度"),
-                ("s2_poster_height", "海报高度"), ("s2_poster_spacing_x", "海报横向间距"),
+                ("s2_poster_count", "海报数量"), ("s2_poster_spacing_x", "海报横向间距"),
                 ("s2_poster_spacing_y", "海报纵向间距"), ("s2_poster_stagger", "列错位距离"),
                 ("s2_poster_rotation", "海报墙旋转角度"), ("s2_poster_center_x", "海报墙中心X"),
-                ("s2_poster_center_y", "海报墙中心Y"), ("s2_text_pos_x", "标题X"),
-                ("s2_text_pos_y", "标题Y"), ("s2_font_size_zh", "中文字号"),
-                ("s2_font_size_en", "英文字号"), ("s2_en_letter_spacing", "英文字距"),
+                ("s2_poster_center_y", "海报墙中心Y"), ("s2_font_size_zh", "中文字号"),
+                ("s2_font_size_en", "英文字号"),
                 ("s2_en_line_spacing", "英文行距"),
             ]),
         ]
@@ -620,35 +565,31 @@ class EmbyLibraryCover(_PluginBase):
             "enabled": False, "run_once": False, "use_mp_config": True,
             "media_server": "",
             "emby_url": "", "api_key": "", "user_id": "",
-            "cron": "0 3 * * *", "schedule_time": "", "update_interval_hours": 0,
+            "cron": "0 3 * * *",
             "library_map": DEFAULT_LIBRARY_MAP,
             "style": "style_1", "output_format": "jpg", "jpeg_quality": 92,
             "output_width": 1920, "output_height": 1080,
             "output_dir": "", "font_zh_path": "", "font_en_path": "",
             "upload_enabled": False, "verify_upload": False,
-            "upload_target": "item", "verify_ssl": True, "timeout": 30,
-            "s1_text_pos_zh_x": 100, "s1_text_pos_zh_y": 100,
-            "s1_text_pos_en_x": 110, "s1_text_pos_en_y": 260,
+            "verify_ssl": True, "timeout": 30,
             "s1_font_size_zh": 150, "s1_font_size_en": 70,
-            "s1_en_letter_spacing": 10, "s1_en_line_spacing": 12,
-            "s1_poster_count": 6, "s1_poster_width": 280, "s1_poster_height": 420,
+            "s1_en_line_spacing": 12,
+            "s1_poster_count": 6,
             "s1_poster_spacing": 20, "s1_poster_y_pos": 610,
-            "s1_background_blur_enable": False, "s1_blur_percent": 0,
             "s1_overlay_alpha": 110, "s1_gradient_width": 1000,
-            "s1_gradient_max_alpha": 180, "s1_bottom_gradient_enable": True,
-            "s1_bottom_gradient_max_alpha": 155, "s1_snow_enable": True,
+            "s1_gradient_max_alpha": 180,
+            "s1_bottom_gradient_max_alpha": 155,
             "s1_snow_density": 60, "s1_snow_radius_min": 2, "s1_snow_radius_max": 8,
             "s1_snow_alpha_min": 120, "s1_snow_alpha_max": 200,
             "s1_snow_seed": 20260708,
-            "s2_poster_count": 9, "s2_poster_width": 400, "s2_poster_height": 600,
+            "s2_poster_count": 9,
             "s2_poster_spacing_x": 10, "s2_poster_spacing_y": 10,
             "s2_poster_stagger": 180, "s2_poster_rotation": -15,
             "s2_poster_center_x": 1600, "s2_poster_center_y": 540,
-            "s2_text_pos_x": 100, "s2_text_pos_y": 390,
             "s2_font_size_zh": 180, "s2_font_size_en": 50,
-            "s2_en_letter_spacing": 6, "s2_en_line_spacing": 12,
-            "s2_accent_bar_enable": True, "s2_accent_bar_color": "#FF8C00",
-            "s2_bg_auto_color": True, "s2_bg_default_color": "#1E1E23",
+            "s2_en_line_spacing": 12,
+            "s2_accent_bar_color": "#FF8C00",
+            "s2_bg_default_color": "#1E1E23",
         }
 
     def get_page(self) -> List[dict]:
