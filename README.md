@@ -112,7 +112,7 @@ https://github.com/g-steven037/MoviePilot-Plugins
 - 自动读取不会将MoviePilot保存的地址或API Key回填到手动输入框。配置页顶部会显示检测到的Emby服务器数量；选择服务器后，需要同时打开“插件启用”并保存，插件初始化时才会读取使用。
 - `媒体库标题映射`：每行格式为 `媒体库名称|中文标题|英文标题`；英文标题需要换行时填写字面量 `\n`。
 - `输出目录`：留空时写入 MoviePilot 配置目录下的 `plugins/embylibrarycover/output`；也可填写容器内可写的绝对路径。
-- `中文/英文字体路径`：留空时使用插件内置的 Noto Sans SC；也可填写容器内已存在的 `.ttf`、`.otf` 或 `.ttc` 绝对路径覆盖默认字体。
+- `中文/英文字体路径`：留空时中文使用静态版 Noto Sans CJK SC Bold，英文使用 Melete Bold；也可填写容器内已存在的 `.ttf`、`.otf` 或 `.ttc` 绝对路径覆盖默认字体。
 - `上传覆盖Emby封面`：默认关闭。开启后才会向Emby写入图片。
 - `上传后验证`：默认关闭；开启后会在上传前后各下载一次 ItemId 主图并比较本地SHA-256指纹，增加两次Emby请求。
 - `校验HTTPS证书`：默认开启。除可信内网自签名环境外不应关闭。
@@ -132,4 +132,4 @@ https://github.com/g-steven037/MoviePilot-Plugins
 
 ## 字体许可
 
-插件内置的 `NotoSansSC-Variable.ttf` 来自 Google Fonts，按 SIL Open Font License 1.1 再分发；许可证原文位于插件的 `fonts/OFL.txt`。字体仅用于本地生成封面，不会上传字体文件。
+中文字体 `NotoSansCJKsc-Bold.otf` 来自 Noto Fonts 官方仓库，英文 `Melete-Bold.otf` 的内部许可声明为 SIL Open Font License 1.1；对应许可证位于 `fonts/OFL-NotoSansCJK.txt` 和 `fonts/OFL-Melete.txt`。字体仅用于本地生成封面，不会上传字体文件。

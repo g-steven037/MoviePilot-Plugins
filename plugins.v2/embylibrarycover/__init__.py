@@ -30,14 +30,15 @@ DEFAULT_LIBRARY_MAP = """动画电影|动画电影|ANIME\\nMOVIE
 纪录片|纪录片|DOCUMENTARY
 精选合集|精选合集|CURATED\\nCOLLECTION"""
 
-EMBEDDED_FONT_NAME = "NotoSansSC-Variable.ttf"
+EMBEDDED_ZH_FONT_NAME = "NotoSansCJKsc-Bold.otf"
+EMBEDDED_EN_FONT_NAME = "Melete-Bold.otf"
 
 
 class EmbyLibraryCover(_PluginBase):
     plugin_name = "Emby媒体库封面"
     plugin_desc = "根据Emby最新媒体海报生成横版媒体库封面，可按Cron定时生成并选择性上传覆盖，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/emby-library-cover.svg"
-    plugin_version = "0.1.7"
+    plugin_version = "0.1.8"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "embylibrarycover_"
@@ -73,9 +74,10 @@ class EmbyLibraryCover(_PluginBase):
                 raise ValueError("STYLE_INVALID")
             timeout = self._bounded_int(config.get("timeout", 30), 5, 120)
             self._output_dir = self._prepare_output_dir(config.get("output_dir", ""))
-            embedded_font = self._embedded_font_path()
-            font_zh = self._prepare_font(config.get("font_zh_path", "")) or embedded_font
-            font_en = self._prepare_font(config.get("font_en_path", "")) or embedded_font
+            embedded_zh_font = self._embedded_font_path(EMBEDDED_ZH_FONT_NAME)
+            embedded_en_font = self._embedded_font_path(EMBEDDED_EN_FONT_NAME)
+            font_zh = self._prepare_font(config.get("font_zh_path", "")) or embedded_zh_font
+            font_en = self._prepare_font(config.get("font_en_path", "")) or embedded_en_font
             render_config = self._build_render_config(config, font_zh, font_en)
             self._output_format = render_config["output_format"]
             self._upload_enabled = bool(config.get("upload_enabled", False))
@@ -324,10 +326,12 @@ class EmbyLibraryCover(_PluginBase):
         return str(resolved)
 
     @staticmethod
-    def _embedded_font_path() -> str:
+    def _embedded_font_path(font_name: str) -> str:
         """Return only the regular font file shipped inside this plugin."""
+        if font_name not in {EMBEDDED_ZH_FONT_NAME, EMBEDDED_EN_FONT_NAME}:
+            return ""
         font_dir = (Path(__file__).resolve().parent / "fonts").resolve()
-        candidate = font_dir / EMBEDDED_FONT_NAME
+        candidate = font_dir / font_name
         if candidate.is_symlink():
             return ""
         try:
@@ -482,8 +486,8 @@ class EmbyLibraryCover(_PluginBase):
             ("user_id", "手动Emby用户ID（可留空自动获取）", "text"),
             ("cron", "生成计划 Cron（5段）", "text"),
             ("output_dir", "输出目录（留空使用MoviePilot配置目录）", "text"),
-            ("font_zh_path", "中文字体绝对路径（留空使用内置Noto Sans SC）", "text"),
-            ("font_en_path", "英文字体绝对路径（留空使用内置Noto Sans SC）", "text"),
+            ("font_zh_path", "中文字体绝对路径（留空使用内置Noto Sans CJK SC）", "text"),
+            ("font_en_path", "英文字体绝对路径（留空使用内置Melete Bold）", "text"),
             ("timeout", "请求超时秒数（5-120）", "number"),
             ("output_width", "输出宽度（640-3840）", "number"),
             ("output_height", "输出高度（360-2160）", "number"),

@@ -10,7 +10,10 @@ security._install_stubs()
 PLUGIN_ROOT = Path(__file__).parents[1] / "plugins.v2"
 sys.path.insert(0, str(PLUGIN_ROOT))
 
-from embylibrarycover import DEFAULT_LIBRARY_MAP, EmbyLibraryCover
+from embylibrarycover import (
+    DEFAULT_LIBRARY_MAP, EMBEDDED_EN_FONT_NAME, EMBEDDED_ZH_FONT_NAME,
+    EmbyLibraryCover,
+)
 from embylibrarycover.client import EmbyClient, EmbyError, validate_base_url
 from embylibrarycover.renderer import CoverRenderer, DEFAULT_RENDER_CONFIG
 from PIL import Image, ImageFont
@@ -164,13 +167,19 @@ def test_renderer_creates_both_styles(tmp_path: Path):
 
 
 def test_embedded_font_exists_and_renders_chinese(tmp_path: Path):
-    font_path = EmbyLibraryCover._embedded_font_path()
-    assert font_path
-    assert Path(font_path).name == "NotoSansSC-Variable.ttf"
-    ImageFont.truetype(font_path, 32)
+    zh_font_path = EmbyLibraryCover._embedded_font_path(EMBEDDED_ZH_FONT_NAME)
+    en_font_path = EmbyLibraryCover._embedded_font_path(EMBEDDED_EN_FONT_NAME)
+    assert Path(zh_font_path).name == "NotoSansCJKsc-Bold.otf"
+    assert Path(en_font_path).name == "Melete-Bold.otf"
+    zh_font = ImageFont.truetype(zh_font_path, 32)
+    en_font = ImageFont.truetype(en_font_path, 32)
+    for text in ("华语电影", "动画剧集", "综艺儿童", "纪录片精选合集"):
+        assert zh_font.getbbox(text) is not None
+    assert en_font.getbbox("ANIME MOVIES TV SHOWS") is not None
+    assert EmbyLibraryCover._embedded_font_path("../outside.ttf") == ""
     renderer = CoverRenderer({
-        "font_zh_path": font_path,
-        "font_en_path": font_path,
+        "font_zh_path": zh_font_path,
+        "font_en_path": en_font_path,
         "output_format": "png",
         "output_size": (640, 360),
         "s1_poster_count": 1,
