@@ -12,6 +12,7 @@ import test_plugin_security as plugin
 import test_rapid as rapid
 import test_emby_library_cover as emby
 import test_download_capacity_guard as capacity
+import test_drama_calendar as calendar
 
 
 def temporary_path() -> Path:
@@ -57,7 +58,11 @@ def main() -> int:
     capacity.test_guard_counts_active_remaining_and_concurrent_reservations(temporary_path())
     capacity.test_guard_rejects_unknown_size_and_calculates_remaining(temporary_path())
     capacity.test_guard_form_defaults_are_fail_closed()
-    print("All 35 unit, security, rendering, realtime, and capacity-control tests passed.")
+    calendar.test_calendar_formats_multiple_days_and_episode_ranges()
+    calendar.test_cache_persists_and_prunes_safely(temporary_path())
+    calendar.test_moviepilot_media_config_is_resolved_without_logging_secrets()
+    calendar.test_form_uses_moviepilot_notification_defaults_without_bot_commands()
+    print("All 39 unit, security, rendering, realtime, capacity-control, and calendar tests passed.")
     return 0
 
 
