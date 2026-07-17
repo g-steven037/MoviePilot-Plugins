@@ -59,6 +59,7 @@ https://github.com/g-steven037/MoviePilot-Plugins
 - 默认展示未来7天，可设置1～31天。
 - 按日期、剧名、季和连续集数组合排版。
 - 🟢表示该集已在媒体库中，🔴表示尚未入库。
+- 通知范围支持“全都通知”“仅通知已入库”“仅通知未入库”，默认全都通知。
 - 自动读取MoviePilot的Emby/Jellyfin地址、API Key和用户ID；也支持关闭自动读取后手动填写。
 - TMDB凭据留空时使用MoviePilot内置TMDB API Key，也支持填写自己的v3 API Key或Read Access Token。
 - SQLite是Python内嵌的单文件数据库，不需要额外数据库或容器；缓存保存在MoviePilot插件数据目录，普通更新和重启不会丢失。
@@ -70,6 +71,7 @@ https://github.com/g-steven037/MoviePilot-Plugins
 - `发送计划 Cron`：默认 `0 9 * * *`。
 - `时区`：默认 `Asia/Shanghai`。
 - `日历天数`：默认7天。
+- `通知范围`：默认全都通知；可只发送已入库或只发送待入库剧集。
 - `TMDB每秒请求数`：默认3，降低可减少接口压力。
 - `TMDB限流最大重试次数`：默认5。
 - `TMDB缓存有效小时数`：默认24小时。
