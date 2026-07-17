@@ -13,6 +13,7 @@ https://github.com/g-steven037/MoviePilot-Plugins
 - `P115RapidRetry`：监控硬链接目录，115秒传未命中时转移到临时目录并按 Cron 重试；秒传成功后安全删除对应本地硬链接。
 - `EmbyLibraryCover`：读取 Emby 最新媒体海报，生成横版媒体库封面，并可按 Cron 选择性上传覆盖。
 - `DownloadCapacityGuard`：监控VPS本地磁盘容量，在MoviePilot提交下载任务前判断空间并拒绝容量不足的任务。
+- `DramaCalendar`：读取Emby/Jellyfin剧集与TMDB排期，通过MoviePilot定时发送未来剧集更新日历。
 
 ---
 
@@ -44,6 +45,37 @@ https://github.com/g-steven037/MoviePilot-Plugins
 - 只读取容量和下载任务状态，不删除文件、不暂停任务、不修改下载器配置。
 
 `本地磁盘监控路径`必须填写MoviePilot容器内可见且已存在的绝对目录，例如 `/downloads`。应填写实际承载下载数据的挂载点，不要填写宿主机路径。插件不创建定时任务，仅在MoviePilot准备提交新下载时即时读取磁盘容量和未完成任务剩余量，并记录放行或拒绝日志。
+
+---
+
+# MoviePilot 追剧更新日历（仅自用）
+
+适用于MoviePilot V2.14.4。插件读取MoviePilot中已启用的Emby/Jellyfin配置，扫描媒体库中带TMDB Provider ID且未完结的剧集，再查询TMDB未来排期，并通过MoviePilot的插件通知渠道发送日历。无需单独配置Telegram Bot Token或管理员Chat ID。
+
+## 功能
+
+- 五段Cron定时生成，默认每天北京时间09:00执行。
+- 支持“立即运行一次”手动生成，不注册Bot命令。
+- 默认展示未来7天，可设置1～31天。
+- 按日期、剧名、季和连续集数组合排版。
+- 🟢表示该集已在媒体库中，🔴表示尚未入库。
+- 自动读取MoviePilot的Emby/Jellyfin地址、API Key和用户ID；也支持关闭自动读取后手动填写。
+- TMDB凭据留空时使用MoviePilot内置TMDB API Key，也支持填写自己的v3 API Key或Read Access Token。
+- SQLite是Python内嵌的单文件数据库，不需要额外数据库或容器；缓存保存在MoviePilot插件数据目录，普通更新和重启不会丢失。
+- TMDB请求包含全局限速、429退避重试、缓存和进度日志。
+- 媒体服务器API Key及TMDB Token不会写入日志、历史或通知。
+
+## 主要配置
+
+- `发送计划 Cron`：默认 `0 9 * * *`。
+- `时区`：默认 `Asia/Shanghai`。
+- `日历天数`：默认7天。
+- `TMDB每秒请求数`：默认3，降低可减少接口压力。
+- `TMDB限流最大重试次数`：默认5。
+- `TMDB缓存有效小时数`：默认24小时。
+- `插件通知`：开启后通过MoviePilot已配置的通知渠道发送给管理员。
+
+媒体库剧集必须包含TMDB Provider ID；没有TMDB ID的条目会被跳过。插件只读取媒体服务器元数据，不修改媒体库、不下载文件，也不向媒体服务器写入数据。
 
 ---
 
