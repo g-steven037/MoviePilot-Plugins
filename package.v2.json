@@ -59,12 +59,13 @@
     "name": "下载容量控制",
     "description": "监控VPS本地磁盘容量，在下载任务提交前拦截可能导致容量不足的PT下载，仅自用测试。",
     "labels": "下载,磁盘,容量,PT",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "icon": "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/download-capacity-guard.svg",
     "author": "g-steven037",
     "level": 1,
     "v2": true,
     "history": {
+      "v0.1.1": "取消Cron定时容量检查，改为仅在MoviePilot准备提交下载任务时即时检查并输出放行或拒绝日志",
       "v0.1.0": "首次发布：下载前同步拦截，综合磁盘空闲、保留空间、未完成任务剩余量、安全倍率及并发短期预留判断是否允许下载"
     }
   }
