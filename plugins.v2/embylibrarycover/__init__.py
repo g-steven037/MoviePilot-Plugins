@@ -54,7 +54,7 @@ class EmbyLibraryCover(_PluginBase):
     plugin_name = "Emby媒体库封面"
     plugin_desc = "根据Emby最新媒体海报生成横版媒体库封面，可按Cron定时生成并选择性上传覆盖，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/emby-library-cover.svg"
-    plugin_version = "0.2.1"
+    plugin_version = "0.2.2"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "embylibrarycover_"
@@ -583,11 +583,35 @@ class EmbyLibraryCover(_PluginBase):
                     "items": [{"title": title, "value": value} for title, value in items],
                 }}
             ]}]})
-        visual_groups = [
-            ("Style 1 经典横排参数", [
-                ("s1_font_size_zh", "中文字号"), ("s1_font_size_en", "英文字号"),
-                ("s1_title_gap", "中英文垂直间距"),
-                ("s1_en_letter_spacing", "英文字距"), ("s1_en_line_spacing", "英文行距"),
+        content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [
+            {"component": "VCardTitle", "text": "标题排版对照设置"},
+            {"component": "VCardSubtitle", "text": "相同类型参数合并展示；Style 1 与 Style 2 仍可分别设置，不改变已有配置。"},
+        ]}]})
+        shared_visual_rows = [
+            ("中文字号", "s1_font_size_zh", "s2_font_size_zh"),
+            ("英文字号", "s1_font_size_en", "s2_font_size_en"),
+            ("中英文垂直间距", "s1_title_gap", "s2_title_gap"),
+            ("英文字距", "s1_en_letter_spacing", "s2_en_letter_spacing"),
+            ("英文行距", "s1_en_line_spacing", "s2_en_line_spacing"),
+        ]
+        for label, style1_model, style2_model in shared_visual_rows:
+            content.append({"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{
+                    "component": "VTextField", "props": {
+                        "model": style1_model, "label": f"Style 1 {label}",
+                        "type": "number", "clearable": False,
+                    }
+                }]},
+                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{
+                    "component": "VTextField", "props": {
+                        "model": style2_model, "label": f"Style 2 {label}",
+                        "type": "number", "clearable": False,
+                    }
+                }]},
+            ]})
+
+        independent_visual_groups = [
+            ("Style 1 经典横排独立设置", [
                 ("s1_poster_count", "海报数量"),
                 ("s1_poster_spacing", "海报间距"),
                 ("s1_poster_y_pos", "海报Y坐标"),
@@ -598,17 +622,14 @@ class EmbyLibraryCover(_PluginBase):
                 ("s1_snow_radius_max", "雪花最大半径"), ("s1_snow_alpha_min", "雪花最小透明度"),
                 ("s1_snow_alpha_max", "雪花最大透明度"), ("s1_snow_seed", "雪花随机种子"),
             ]),
-            ("Style 2 倾斜海报墙参数", [
+            ("Style 2 倾斜海报墙独立设置", [
                 ("s2_poster_count", "海报数量"), ("s2_poster_spacing_x", "海报横向间距"),
                 ("s2_poster_spacing_y", "海报纵向间距"), ("s2_poster_stagger", "列错位距离"),
                 ("s2_poster_rotation", "海报墙旋转角度"), ("s2_poster_center_x", "海报墙中心X"),
-                ("s2_poster_center_y", "海报墙中心Y"), ("s2_font_size_zh", "中文字号"),
-                ("s2_title_gap", "中英文垂直间距"),
-                ("s2_font_size_en", "英文字号"), ("s2_en_letter_spacing", "英文字距"),
-                ("s2_en_line_spacing", "英文行距"),
+                ("s2_poster_center_y", "海报墙中心Y"),
             ]),
         ]
-        for title, visual_fields in visual_groups:
+        for title, visual_fields in independent_visual_groups:
             content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [
                 {"component": "VCardTitle", "text": title}
             ]}]})
@@ -632,6 +653,9 @@ class EmbyLibraryCover(_PluginBase):
                 }
             }]},
         ]})
+        content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [
+            {"component": "VCardTitle", "text": "媒体库标题映射"}
+        ]}]})
         content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [
             {"component": "VTextarea", "props": {
                 "model": "library_map", "label": "媒体库标题映射（每行：媒体库名|中文标题|英文标题）",
