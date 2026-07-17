@@ -12,8 +12,6 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Dict, List, Optional, Tuple
 
-from apscheduler.triggers.cron import CronTrigger
-
 from app.chain.download import DownloadChain
 from app.core.config import settings
 from app.core.event import Event, eventmanager
@@ -30,7 +28,7 @@ class DownloadCapacityGuard(_PluginBase):
     plugin_name = "下载容量控制"
     plugin_desc = "监控VPS本地磁盘容量，在下载任务提交前拦截可能导致容量不足的PT下载，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/download-capacity-guard.svg"
-    plugin_version = "0.1.0"
+    plugin_version = "0.1.1"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "downloadcapacityguard_"
@@ -45,10 +43,8 @@ class DownloadCapacityGuard(_PluginBase):
     _reserve_bytes = 10 * GIB
     _size_multiplier = 1.05
     _reservation_seconds = 120
-    _cron = "*/5 * * * *"
     _lock = threading.Lock()
     _reservations: Dict[str, Tuple[int, float]] = {}
-    _last_low_notice = False
 
     def init_plugin(self, config: dict = None):
         self.stop_service()
@@ -57,7 +53,6 @@ class DownloadCapacityGuard(_PluginBase):
         self._notify_enabled = bool(config.get("notify_enabled", False))
         self._reject_unknown_size = bool(config.get("reject_unknown_size", True))
         self._reservations = {}
-        self._last_low_notice = False
         if not self._enabled:
             return
         try:
@@ -75,8 +70,6 @@ class DownloadCapacityGuard(_PluginBase):
             self._reservation_seconds = self._bounded_int(
                 config.get("reservation_seconds", 120), 10, 600
             )
-            self._cron = str(config.get("cron", "*/5 * * * *")).strip()
-            CronTrigger.from_crontab(self._cron)
             logger.info(
                 f"#下载容量控制# 已启用 | 总容量={self._gb(shutil.disk_usage(self._monitor_path).total)} | "
                 f"保留空间={self._gb(self._reserve_bytes)} | 安全倍率={multiplier_percent:g}%"
@@ -293,32 +286,6 @@ class DownloadCapacityGuard(_PluginBase):
             )
             self._record("ALLOWED", "SPACE_OK", requested, safe_available)
 
-    def check_capacity(self):
-        if not self._enabled:
-            return
-        with self._lock:
-            try:
-                free, active, reserved, safe_available = self._snapshot()
-            except Exception as exc:
-                logger.warning(f"#下载容量控制# 定时容量检查失败 [{self._safe_code(exc)}]")
-                self._record("CHECK_FAILED", "CAPACITY_CHECK_FAILED", 0, 0)
-                return
-            low = safe_available <= 0
-            logger.info(
-                f"#下载容量控制# 容量检查 | 磁盘空闲={self._gb(free)} | "
-                f"未完成任务剩余={self._gb(active)} | 短期预留={self._gb(reserved)} | "
-                f"安全可用={self._gb(safe_available)}"
-            )
-            self._record("CHECK", "LOW_SPACE" if low else "SPACE_OK", 0, safe_available)
-            if low and not self._last_low_notice and self._notify_enabled:
-                self._post_bot(
-                    "下载磁盘容量不足",
-                    f"磁盘空闲：{self._gb(free)}\n"
-                    f"未完成任务剩余：{self._gb(active)}\n"
-                    f"安全可用：{self._gb(safe_available)}",
-                )
-            self._last_low_notice = low
-
     def _post_bot(self, title: str, text: str):
         try:
             self.post_message(
@@ -346,21 +313,13 @@ class DownloadCapacityGuard(_PluginBase):
         return self._enabled
 
     def get_service(self) -> List[dict]:
-        if not self._enabled:
-            return []
-        return [{
-            "id": "DownloadCapacityGuard_check",
-            "name": "下载容量控制定时检查",
-            "trigger": CronTrigger.from_crontab(self._cron),
-            "func": self.check_capacity,
-            "kwargs": {},
-        }]
+        return []
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         content = [{"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{
             "component": "VAlert", "props": {
                 "type": "warning", "variant": "tonal",
-                "text": "插件在MoviePilot向下载器提交任务前同步检查容量。安全可用空间会扣除保留空间、未完成任务剩余量和短期并发预留；检查异常默认拒绝下载。监控路径必须是MoviePilot容器内可见的本地绝对路径。",
+                "text": "插件仅在MoviePilot准备向下载器提交任务时同步检查容量，不创建定时任务。安全可用空间会扣除保留空间、未完成任务剩余量和短期并发预留；检查异常默认拒绝下载。监控路径必须是MoviePilot容器内可见的本地绝对路径。",
             }
         }]}]}]
         content.append({"component": "VRow", "content": [
@@ -379,7 +338,6 @@ class DownloadCapacityGuard(_PluginBase):
             ("reserve_gb", "必须保留的空闲空间（GiB）", "number"),
             ("size_multiplier_percent", "新任务容量安全倍率（100-300%）", "number"),
             ("reservation_seconds", "并发任务短期预留秒数（10-600）", "number"),
-            ("cron", "容量状态检查 Cron（5段）", "text"),
         ]
         for model, label, field_type in fields:
             content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{
@@ -395,7 +353,6 @@ class DownloadCapacityGuard(_PluginBase):
             "reserve_gb": 10,
             "size_multiplier_percent": 105,
             "reservation_seconds": 120,
-            "cron": "*/5 * * * *",
         }
 
     def get_page(self) -> List[dict]:
