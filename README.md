@@ -14,6 +14,25 @@ https://github.com/g-steven037/MoviePilot-Plugins
 - `EmbyLibraryCover`：读取 Emby 最新媒体海报，生成横版媒体库封面，并可按 Cron 选择性上传覆盖。
 - `DownloadCapacityGuard`：监控VPS本地磁盘容量，在MoviePilot提交下载任务前判断空间并拒绝容量不足的任务。
 - `DramaCalendar`：读取Emby/Jellyfin剧集与TMDB排期，通过MoviePilot定时发送未来剧集更新日历。
+- `EmbyActorChinese`：按影视名称和年份读取豆瓣演员中文名，严格预览后可同步到Emby。
+
+---
+
+# MoviePilot Emby演员中文化（仅自用测试）
+
+首版仅处理单部电影或剧集。在配置面板填写与Emby完全一致的影视名称、年份和可选类型，勾选“立即运行一次”执行。
+
+- 默认动作是“仅预览”，只在日志和插件历史中显示拟修改的演员，不写入Emby。
+- 确认预览正确后，将动作改为“确认同步到Emby”，再次立即运行。
+- Emby条目必须同时满足名称和年份；出现零个或多个候选时拒绝写入。
+- 豆瓣条目同样按名称、年份和类型匹配，并使用MoviePilot内置豆瓣模块，不直接抓取网页。
+- 只处理Emby中`Type=Actor`且当前不含中文的姓名。
+- 只在Emby英文名与豆瓣`latin_name`规范化后唯一完全相同时替换；不按演员顺序、不使用模糊相似度。
+- 导演、编剧、角色名、海报、剧情和其他元数据保持不变。
+- 同步前保存最近一次演员列表备份；同步后重新读取验证，验证失败会尝试立即回滚。
+- Emby API Key只放在请求头中，不写入URL、日志或插件历史。
+
+默认读取MoviePilot已启用的Emby配置。关闭自动读取后，才需要手动填写Emby地址、API Key和可选用户ID。该测试版没有Cron、批量扫描或Bot命令。
 
 ---
 

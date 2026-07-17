@@ -83,5 +83,19 @@
       "v0.1.1": "增加通知范围下拉选择（全都、仅已入库、仅未入库），通知改为按日期分组并分别展示待入库和已入库剧集及汇总统计",
       "v0.1.0": "首次发布：自动读取MoviePilot媒体服务器和TMDB配置，支持Cron、立即运行、未来排期、入库状态、SQLite单文件缓存、限流重试及脱敏日志，不注册Bot命令"
     }
+  },
+  "EmbyActorChinese": {
+    "name": "Emby演员中文化",
+    "description": "按影视名称和年份匹配豆瓣演员中文名，预览确认后同步到Emby，仅自用测试。",
+    "labels": "Emby,豆瓣,演员,元数据",
+    "version": "0.1.0",
+    "icon": "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/emby-actor-chinese.svg",
+    "author": "g-steven037",
+    "level": 2,
+    "v2": true,
+    "system_version": ">=2.14.4,<3",
+    "history": {
+      "v0.1.0": "单片测试版：按名称、年份和类型严格匹配Emby与豆瓣条目，按豆瓣latin_name唯一匹配英文演员名，支持仅预览、确认同步、写入后验证、失败自动回滚和脱敏历史"
+    }
   }
 }

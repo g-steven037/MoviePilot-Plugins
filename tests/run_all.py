@@ -13,6 +13,7 @@ import test_rapid as rapid
 import test_emby_library_cover as emby
 import test_download_capacity_guard as capacity
 import test_drama_calendar as calendar
+import test_emby_actor_chinese as actor_chinese
 
 
 def temporary_path() -> Path:
@@ -62,7 +63,12 @@ def main() -> int:
     calendar.test_cache_persists_and_prunes_safely(temporary_path())
     calendar.test_moviepilot_media_config_is_resolved_without_logging_secrets()
     calendar.test_form_uses_moviepilot_notification_defaults_without_bot_commands()
-    print("All 39 unit, security, rendering, realtime, capacity-control, and calendar tests passed.")
+    actor_chinese.test_actor_mapping_is_unique_exact_and_actor_only()
+    actor_chinese.test_emby_item_selection_requires_exact_title_year_and_unique_result()
+    actor_chinese.test_form_defaults_to_preview_and_hides_manual_credentials()
+    actor_chinese.test_emby_client_never_puts_key_in_url_and_blocks_redirect()
+    actor_chinese.test_preview_never_writes_and_sync_verifies_write()
+    print("All 44 unit, security, rendering, realtime, capacity-control, calendar, and actor tests passed.")
     return 0
 
 
