@@ -64,7 +64,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "（仅自用）监控目录，秒传失败时转移到临时目录，定时重试，秒传成功后删除本地文件，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
@@ -720,14 +720,18 @@ class P115RapidRetry(_PluginBase):
                 else:
                     if self._detailed_logs:
                         logger.info(f"#115秒传# 秒传成功后删除硬链接文件: {filename}")
-                self._send_bot_success(path, from_retry, cleanup_success=True)
+                self._send_bot_success(
+                    path, from_retry, cleanup_success=True, retry_attempts=attempt_no
+                )
                 self._remove_empty_parent_dirs(path.parent, root)
             else:
                 self._record(task_id, False, "FILE_CHANGED")
                 logger.warning(
                     f"#115秒传# {'秒传成功但本地文件身份变化，未删除' if self._detailed_logs else '[简短] 本地清理失败'}: {filename}"
                 )
-                self._send_bot_success(path, from_retry, cleanup_success=False)
+                self._send_bot_success(
+                    path, from_retry, cleanup_success=False, retry_attempts=attempt_no
+                )
             return
 
         if from_retry:
@@ -867,13 +871,20 @@ class P115RapidRetry(_PluginBase):
             state.pop(task_id, None)
             self.save_data("retry_state", state)
 
-    def _send_bot_success(self, path: Path, from_retry: bool, cleanup_success: bool = True):
+    def _send_bot_success(
+        self,
+        path: Path,
+        from_retry: bool,
+        cleanup_success: bool = True,
+        retry_attempts: int = 0,
+    ):
         if not self._notify_enabled:
             return
+        attempts = 0 if not from_retry else min(max(int(retry_attempts), 1), self._max_retries)
         self._post_bot(
             "115秒传成功",
             f"文件：{self._safe_log_value(path.name, 500)}\n"
-            f"方式：{'临时目录重试' if from_retry else '实时监控'}\n"
+            f"重试次数：{attempts}\n"
             f"本地清理：{'已安全删除对应文件' if cleanup_success else '文件身份变化，未删除，请人工检查'}",
         )
 
