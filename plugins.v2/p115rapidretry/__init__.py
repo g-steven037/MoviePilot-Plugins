@@ -64,7 +64,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "（仅自用）监控目录，秒传失败时转移到临时目录，定时重试，秒传成功后删除本地文件，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
@@ -111,6 +111,8 @@ class P115RapidRetry(_PluginBase):
     def init_plugin(self, config: dict = None):
         self.stop_service()
         config = config or {}
+        run_rapid_once = bool(config.get("run_rapid_once", False))
+        run_retry_once = bool(config.get("run_retry_once", False))
         self._enabled = bool(config.get("enabled", False))
         self._client = None
         self._auth_blocked = False
@@ -165,7 +167,18 @@ class P115RapidRetry(_PluginBase):
             self._load_risk_control(cookie)
             self._client = self._create_client(cookie)
             del cookie
-            self._start_realtime_monitor()
+            if run_rapid_once or run_retry_once:
+                config = dict(config)
+                config["run_rapid_once"] = False
+                config["run_retry_once"] = False
+                self.update_config(config)
+            self._start_realtime_monitor(queue_existing=False)
+            if run_retry_once:
+                self._put_control_event("retry_now")
+            if run_rapid_once:
+                self._put_control_event("scan_now")
+            if not run_rapid_once:
+                self._queue_existing_files()
         except Exception as exc:
             self._enabled = False
             self._client = None
@@ -430,7 +443,29 @@ class P115RapidRetry(_PluginBase):
 
     def get_service(self) -> Optional[List[Dict[str, Any]]]:
         if not self._enabled:
-            retu…3833 tokens truncated…eading.current_thread().name}] 文件处理完成(移至临时目录): {self._safe_log_value(destination.name)}")
+            return None
+        services = [{
+            "id": "P115RapidRetry_retry",
+            "name": "115秒传临时目录限速重试",
+            "trigger": CronTrigger.from_crontab(self._cron),
+            "func": self.retry_pending,
+            "kwargs": {},
+        }]
+        if self._empty_cleanup_enabled:
+            services.append({
+    …3808 tokens truncated…ntity(path, identity, self._watch_dir):
+                self._record(task_id, False, "FILE_CHANGED")
+                return
+            os.replace(path, destination)
+            if not same_identity(destination, identity, self._retry_dir):
+                if not path.exists():
+                    os.replace(destination, path)
+                self._record(task_id, False, "FILE_CHANGED")
+                return
+            self._initialize_retry(self._task_id(destination, self._retry_dir), "RAPID_MISS")
+            if self._detailed_logs:
+                logger.info(f"#115秒传# 文件已移动到临时目录: {self._safe_log_value(destination)}")
+                logger.info(f"#115秒传# [后台线程-{threading.current_thread().name}] 文件处理完成(移至临时目录): {self._safe_log_value(destination.name)}")
             else:
                 logger.info(
                     f"#115秒传# [简短] 已转移临时文件夹 | 文件={self._safe_log_value(destination.name)} | "
@@ -755,6 +790,8 @@ class P115RapidRetry(_PluginBase):
         content = [{"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "text": "Cookie 仅用于登录115官方接口，不发送给其他第三方，不写入插件日志或历史；MoviePilot 会将其保存在自身配置中，请保护管理端和数据目录。"}}]}]}]
         content.append({"component": "VRow", "content": [
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "插件启用"}}]},
+            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "run_rapid_once", "label": "立即运行秒传一次"}}]},
+            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "run_retry_once", "label": "立即重试秒传一次"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "notify_enabled", "label": "Bot通知"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "detailed_logs", "label": "详细日志"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "empty_cleanup_enabled", "label": "定时清理空文件夹"}}]},
@@ -776,7 +813,8 @@ class P115RapidRetry(_PluginBase):
                 })
             content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": component, "props": props}]}]})
         return [{"component": "VForm", "content": content}], {
-            "enabled": False, "notify_enabled": False, "detailed_logs": True,
+            "enabled": False, "run_rapid_once": False, "run_retry_once": False,
+            "notify_enabled": False, "detailed_logs": True,
             "delete_exhausted_enabled": False,
             "empty_cleanup_enabled": False, "cookie": "",
             "protected_pt_dir": "", "watch_dir": "", "retry_dir": "", "target_pid": "0",
@@ -815,3 +853,4 @@ class P115RapidRetry(_PluginBase):
             self._worker.join(timeout=10)
         self._worker = None
         self._client = None
+
