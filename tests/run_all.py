@@ -11,6 +11,7 @@ sys.path.insert(0, str(TESTS))
 import test_plugin_security as plugin
 import test_rapid as rapid
 import test_emby_library_cover as emby
+import test_download_capacity_guard as capacity
 
 
 def temporary_path() -> Path:
@@ -53,7 +54,10 @@ def main() -> int:
     emby.test_embedded_font_exists_and_renders_chinese(temporary_path())
     emby.test_visual_config_is_validated_and_applied()
     emby.test_safe_filename_does_not_escape_output_directory()
-    print("All 32 unit, security, rendering, and realtime integration tests passed.")
+    capacity.test_guard_counts_active_remaining_and_concurrent_reservations(temporary_path())
+    capacity.test_guard_rejects_unknown_size_and_calculates_remaining(temporary_path())
+    capacity.test_guard_form_defaults_are_fail_closed()
+    print("All 35 unit, security, rendering, realtime, and capacity-control tests passed.")
     return 0
 
 
