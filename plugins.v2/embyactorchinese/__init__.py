@@ -17,7 +17,7 @@ class EmbyActorChinese(_PluginBase):
     plugin_name = "Emby演员中文化"
     plugin_desc = "按影视名称和年份匹配豆瓣演员中文名，预览确认后同步到Emby，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/emby-actor-chinese.svg"
-    plugin_version = "0.1.0"
+    plugin_version = "0.1.1"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "embyactorchinese_"
@@ -93,8 +93,28 @@ class EmbyActorChinese(_PluginBase):
 
     @staticmethod
     def _normalize_name(value: Any) -> str:
-        text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+        text = unicodedata.normalize("NFKD", str(value or ""))
+        text = "".join(char for char in text if not unicodedata.combining(char)).casefold()
         return "".join(char for char in text if char.isalnum())
+
+    @staticmethod
+    def _latin_tokens(value: Any) -> List[str]:
+        text = unicodedata.normalize("NFKD", str(value or ""))
+        text = "".join(char for char in text if not unicodedata.combining(char))
+        text = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", text)
+        return [token.casefold() for token in re.findall(r"[A-Za-z0-9]+", text) if token]
+
+    @classmethod
+    def _latin_order_keys(cls, value: Any) -> set:
+        """生成姓氏前置/后置的有限变体，不进行模糊相似度猜测。"""
+        tokens = cls._latin_tokens(value)
+        if not tokens:
+            return set()
+        variants = {"".join(tokens)}
+        if len(tokens) >= 2:
+            variants.add("".join(tokens[-1:] + tokens[:-1]))
+            variants.add("".join(tokens[1:] + tokens[:1]))
+        return {key for key in variants if len(key) >= 4}
 
     @staticmethod
     def _contains_cjk(value: Any) -> bool:
@@ -102,35 +122,67 @@ class EmbyActorChinese(_PluginBase):
 
     @classmethod
     def build_actor_mapping(cls, people: List[dict], credits: List[Any]) -> Tuple[List[dict], List[dict]]:
-        """仅按豆瓣 latin_name 唯一精确匹配；不按顺序或模糊相似度猜测。"""
-        aliases: Dict[str, set] = {}
+        updated, changes, _stats = cls._build_actor_mapping_detailed(people, credits)
+        return updated, changes
+
+    @classmethod
+    def _build_actor_mapping_detailed(
+        cls, people: List[dict], credits: List[Any]
+    ) -> Tuple[List[dict], List[dict], Dict[str, int]]:
+        """按唯一拉丁名及有限姓名顺序变体匹配；绝不按演员列表顺序套用。"""
+        exact_aliases: Dict[str, set] = {}
+        order_aliases: Dict[str, set] = {}
+        latin_credit_count = 0
         for credit in credits[:500]:
             getter = credit.get if isinstance(credit, dict) else lambda key, default=None: getattr(credit, key, default)
             chinese = str(getter("name", "") or "").strip()
-            latin = str(getter("latin_name", "") or "").strip()
-            if not cls._contains_cjk(chinese) or not latin:
+            candidates = [str(getter("latin_name", "") or "").strip()]
+            aliases = getter("also_known_as", []) or []
+            if isinstance(aliases, list):
+                candidates.extend(str(alias or "").strip() for alias in aliases[:20])
+            candidates = [name for name in candidates if name and not cls._contains_cjk(name)]
+            if not cls._contains_cjk(chinese) or not candidates:
                 continue
-            key = cls._normalize_name(latin)
-            if key:
-                aliases.setdefault(key, set()).add(chinese)
+            latin_credit_count += 1
+            for latin in candidates:
+                key = cls._normalize_name(latin)
+                if key:
+                    exact_aliases.setdefault(key, set()).add(chinese)
+                for order_key in cls._latin_order_keys(latin):
+                    order_aliases.setdefault(order_key, set()).add(chinese)
 
         updated = copy.deepcopy(people)
         changes: List[dict] = []
+        stats = {
+            "emby_actors": 0, "emby_english": 0, "douban_credits": min(len(credits), 500),
+            "douban_latin": latin_credit_count, "exact": 0, "order_variant": 0,
+            "ambiguous": 0, "unmatched": 0,
+        }
         for index, person in enumerate(updated[:500]):
             if not isinstance(person, dict) or str(person.get("Type") or "").casefold() != "actor":
                 continue
+            stats["emby_actors"] += 1
             current = str(person.get("Name") or "").strip()
             if not current or cls._contains_cjk(current):
                 continue
-            targets = aliases.get(cls._normalize_name(current), set())
+            stats["emby_english"] += 1
+            method = "exact"
+            targets = exact_aliases.get(cls._normalize_name(current), set())
+            if not targets:
+                method = "order_variant"
+                targets = set()
+                for key in cls._latin_order_keys(current):
+                    targets.update(order_aliases.get(key, set()))
             if len(targets) != 1:
+                stats["ambiguous" if len(targets) > 1 else "unmatched"] += 1
                 continue
             target = next(iter(targets))
             if target == current:
                 continue
             person["Name"] = target
-            changes.append({"index": index, "from": current[:200], "to": target[:200]})
-        return updated, changes
+            stats[method] += 1
+            changes.append({"index": index, "from": current[:200], "to": target[:200], "method": method})
+        return updated, changes, stats
 
     @classmethod
     def select_exact_item(cls, items: List[dict], title: str, year: int) -> dict:
@@ -213,7 +265,14 @@ class EmbyActorChinese(_PluginBase):
                 )
                 if emby_douban_id and emby_douban_id != douban_id:
                     raise ValueError("DOUBAN_ID_MISMATCH")
-            updated_people, changes = self.build_actor_mapping(detail.get("People") or [], credits)
+            updated_people, changes, stats = self._build_actor_mapping_detailed(detail.get("People") or [], credits)
+            logger.info(
+                "#Emby演员中文化# 匹配统计 | "
+                f"Emby演员={stats['emby_actors']} | Emby英文名={stats['emby_english']} | "
+                f"豆瓣演员={stats['douban_credits']} | 豆瓣拉丁名={stats['douban_latin']} | "
+                f"精确匹配={stats['exact']} | 姓名顺序变体={stats['order_variant']} | "
+                f"歧义跳过={stats['ambiguous']} | 未匹配={stats['unmatched']}"
+            )
             if not changes:
                 raise ValueError("NO_SAFE_ACTOR_MATCH")
             for change in changes:

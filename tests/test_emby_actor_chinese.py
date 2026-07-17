@@ -33,8 +33,24 @@ def test_actor_mapping_is_unique_exact_and_actor_only():
     assert updated[1]["Name"] == "Robert Zemeckis"
     assert updated[2]["Name"] == "周迅"
     assert updated[3]["Name"] == "Ambiguous Name"
-    assert changes == [{"index": 0, "from": "Tom Hanks", "to": "汤姆·汉克斯"}]
+    assert changes == [{"index": 0, "from": "Tom Hanks", "to": "汤姆·汉克斯", "method": "exact"}]
     assert people[0]["Name"] == "Tom Hanks"
+
+
+def test_actor_mapping_accepts_only_unique_surname_order_variants():
+    people = [
+        {"Name": "Meng Ziyi", "Type": "Actor"},
+        {"Name": "Timothee Chalamet", "Type": "Actor"},
+    ]
+    credits = [
+        types.SimpleNamespace(name="孟子义", latin_name="Zi-yi Meng", also_known_as=[]),
+        types.SimpleNamespace(name="提莫西·查拉梅", latin_name="Timothée Chalamet", also_known_as=[]),
+    ]
+    updated, changes, stats = EmbyActorChinese._build_actor_mapping_detailed(people, credits)
+    assert [person["Name"] for person in updated] == ["孟子义", "提莫西·查拉梅"]
+    assert stats["order_variant"] == 1
+    assert stats["exact"] == 1
+    assert len(changes) == 2
 
 
 def test_emby_item_selection_requires_exact_title_year_and_unique_result():
