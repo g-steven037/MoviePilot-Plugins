@@ -85,16 +85,17 @@
     }
   },
   "EmbyActorChinese": {
-    "name": "Emby演员中文化",
-    "description": "按影视名称和年份匹配豆瓣演员中文名，预览确认后同步到Emby，仅自用测试。",
-    "labels": "Emby,豆瓣,演员,元数据",
-    "version": "0.1.1",
+    "name": "Emby角色中文化",
+    "description": "按影视名称和年份匹配豆瓣演职员表，将演员角色名中文化并同步到Emby，仅自用测试。",
+    "labels": "Emby,豆瓣,演员,角色,元数据",
+    "version": "0.2.0",
     "icon": "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/emby-actor-chinese.svg",
     "author": "g-steven037",
     "level": 2,
     "v2": true,
     "system_version": ">=2.14.4,<3",
     "history": {
+      "v0.2.0": "按实际需求改为角色名中文化：保持演员Name不变，通过演员中文名或唯一拉丁名对应豆瓣演员，将豆瓣roles写入Emby People.Role；增加中文角色、身份匹配、无角色及歧义统计，并继续支持预览、验证和失败回滚",
       "v0.1.1": "修复中文演员常见的姓氏前置/后置、连字符、空格和重音差异导致零匹配；仍要求中文目标唯一，并增加Emby英文演员、豆瓣拉丁名、精确匹配、顺序变体及跳过原因统计日志",
       "v0.1.0": "单片测试版：按名称、年份和类型严格匹配Emby与豆瓣条目，按豆瓣latin_name唯一匹配英文演员名，支持仅预览、确认同步、写入后验证、失败自动回滚和脱敏历史"
     }

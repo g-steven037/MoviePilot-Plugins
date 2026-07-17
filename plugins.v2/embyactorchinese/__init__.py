@@ -14,10 +14,10 @@ from .client import EmbyActorClient, EmbyActorError
 
 
 class EmbyActorChinese(_PluginBase):
-    plugin_name = "Emby演员中文化"
-    plugin_desc = "按影视名称和年份匹配豆瓣演员中文名，预览确认后同步到Emby，仅自用测试。"
+    plugin_name = "Emby角色中文化"
+    plugin_desc = "按影视名称和年份匹配豆瓣演职员表，将演员角色名中文化并同步到Emby，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/emby-actor-chinese.svg"
-    plugin_version = "0.1.1"
+    plugin_version = "0.2.0"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "embyactorchinese_"
@@ -40,7 +40,7 @@ class EmbyActorChinese(_PluginBase):
                 url, api_key, user_id, server_name = self._load_moviepilot_emby(
                     str(config.get("media_server", "")).strip()
                 )
-                logger.info(f"#Emby演员中文化# 已读取MoviePilot媒体服务器 | 名称={self._safe_text(server_name)}")
+                logger.info(f"#Emby角色中文化# 已读取MoviePilot媒体服务器 | 名称={self._safe_text(server_name)}")
             else:
                 url = config.get("emby_url", "")
                 api_key = config.get("emby_api_key", "")
@@ -53,7 +53,7 @@ class EmbyActorChinese(_PluginBase):
                 verify_https=bool(config.get("verify_https", True)),
             )
             if str(url).lower().startswith("https://") and not bool(config.get("verify_https", True)):
-                logger.warning("#Emby演员中文化# HTTPS证书校验已关闭，仅应在可信内网使用")
+                logger.warning("#Emby角色中文化# HTTPS证书校验已关闭，仅应在可信内网使用")
             if bool(config.get("run_once", False)):
                 config["run_once"] = False
                 self.update_config(config)
@@ -64,13 +64,13 @@ class EmbyActorChinese(_PluginBase):
                     daemon=True,
                 )
                 self._thread.start()
-            logger.info("Emby演员中文化：插件已启用")
+            logger.info("Emby角色中文化：插件已启用")
         except Exception as exc:
             self._enabled = False
             if self._client:
                 self._client.close()
             self._client = None
-            logger.error(f"Emby演员中文化：初始化失败 [{self._safe_code(exc)}]")
+            logger.error(f"Emby角色中文化：初始化失败 [{self._safe_code(exc)}]")
 
     @staticmethod
     def _bounded_int(value: Any, minimum: int, maximum: int) -> int:
@@ -121,6 +121,21 @@ class EmbyActorChinese(_PluginBase):
         return bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff]", str(value or "")))
 
     @classmethod
+    def _extract_chinese_role(cls, value: Any) -> str:
+        roles = value if isinstance(value, list) else [value]
+        result: List[str] = []
+        for role in roles[:20]:
+            if isinstance(role, dict):
+                role = next((role.get(key) for key in ("character", "name", "role", "title") if role.get(key)), "")
+            text = re.sub(r"^(?:饰演?|配音|voice|as)\s*[:：]?\s*", "", str(role or "").strip(), flags=re.I)
+            text = re.sub(r"[\x00-\x1f\x7f]+", " ", text).strip()
+            if not text or not cls._contains_cjk(text) or text in {"演员", "主演", "配音演员"}:
+                continue
+            if text not in result:
+                result.append(text[:100])
+        return " / ".join(result)[:200]
+
+    @classmethod
     def build_actor_mapping(cls, people: List[dict], credits: List[Any]) -> Tuple[List[dict], List[dict]]:
         updated, changes, _stats = cls._build_actor_mapping_detailed(people, credits)
         return updated, changes
@@ -129,7 +144,9 @@ class EmbyActorChinese(_PluginBase):
     def _build_actor_mapping_detailed(
         cls, people: List[dict], credits: List[Any]
     ) -> Tuple[List[dict], List[dict], Dict[str, int]]:
-        """按唯一拉丁名及有限姓名顺序变体匹配；绝不按演员列表顺序套用。"""
+        """唯一识别演员身份后修改Role；演员Name保持不变。"""
+        records: List[Dict[str, Any]] = []
+        chinese_aliases: Dict[str, set] = {}
         exact_aliases: Dict[str, set] = {}
         order_aliases: Dict[str, set] = {}
         latin_credit_count = 0
@@ -141,47 +158,69 @@ class EmbyActorChinese(_PluginBase):
             if isinstance(aliases, list):
                 candidates.extend(str(alias or "").strip() for alias in aliases[:20])
             candidates = [name for name in candidates if name and not cls._contains_cjk(name)]
-            if not cls._contains_cjk(chinese) or not candidates:
+            role = cls._extract_chinese_role(getter("roles", []))
+            if not cls._contains_cjk(chinese):
                 continue
-            latin_credit_count += 1
+            record_id = len(records)
+            records.append({"name": chinese, "role": role})
+            chinese_key = cls._normalize_name(chinese)
+            if chinese_key:
+                chinese_aliases.setdefault(chinese_key, set()).add(record_id)
+            if candidates:
+                latin_credit_count += 1
             for latin in candidates:
                 key = cls._normalize_name(latin)
                 if key:
-                    exact_aliases.setdefault(key, set()).add(chinese)
+                    exact_aliases.setdefault(key, set()).add(record_id)
                 for order_key in cls._latin_order_keys(latin):
-                    order_aliases.setdefault(order_key, set()).add(chinese)
+                    order_aliases.setdefault(order_key, set()).add(record_id)
 
         updated = copy.deepcopy(people)
         changes: List[dict] = []
         stats = {
-            "emby_actors": 0, "emby_english": 0, "douban_credits": min(len(credits), 500),
-            "douban_latin": latin_credit_count, "exact": 0, "order_variant": 0,
-            "ambiguous": 0, "unmatched": 0,
+            "emby_actors": 0, "emby_chinese": 0, "emby_english": 0,
+            "douban_credits": min(len(credits), 500), "douban_latin": latin_credit_count,
+            "douban_roles": sum(1 for record in records if record["role"]),
+            "chinese_name": 0, "exact": 0, "order_variant": 0,
+            "ambiguous": 0, "unmatched": 0, "no_role": 0,
         }
         for index, person in enumerate(updated[:500]):
             if not isinstance(person, dict) or str(person.get("Type") or "").casefold() != "actor":
                 continue
             stats["emby_actors"] += 1
             current = str(person.get("Name") or "").strip()
-            if not current or cls._contains_cjk(current):
+            if not current:
                 continue
-            stats["emby_english"] += 1
-            method = "exact"
-            targets = exact_aliases.get(cls._normalize_name(current), set())
-            if not targets:
-                method = "order_variant"
-                targets = set()
-                for key in cls._latin_order_keys(current):
-                    targets.update(order_aliases.get(key, set()))
+            if cls._contains_cjk(current):
+                stats["emby_chinese"] += 1
+                method = "chinese_name"
+                targets = chinese_aliases.get(cls._normalize_name(current), set())
+            else:
+                stats["emby_english"] += 1
+                method = "exact"
+                targets = exact_aliases.get(cls._normalize_name(current), set())
+                if not targets:
+                    method = "order_variant"
+                    targets = set()
+                    for key in cls._latin_order_keys(current):
+                        targets.update(order_aliases.get(key, set()))
             if len(targets) != 1:
                 stats["ambiguous" if len(targets) > 1 else "unmatched"] += 1
                 continue
-            target = next(iter(targets))
-            if target == current:
+            record = records[next(iter(targets))]
+            target = str(record["role"] or "")
+            if not target:
+                stats["no_role"] += 1
                 continue
-            person["Name"] = target
+            old_role = str(person.get("Role") or "").strip()
+            if target == old_role:
+                continue
+            person["Role"] = target
             stats[method] += 1
-            changes.append({"index": index, "from": current[:200], "to": target[:200], "method": method})
+            changes.append({
+                "index": index, "actor": current[:200], "from": old_role[:200],
+                "to": target[:200], "method": method,
+            })
         return updated, changes, stats
 
     @classmethod
@@ -236,7 +275,7 @@ class EmbyActorChinese(_PluginBase):
 
     def run_test(self, config: dict):
         if not self._client or not self._run_lock.acquire(blocking=False):
-            logger.warning("#Emby演员中文化# 当前已有任务运行，本次跳过")
+            logger.warning("#Emby角色中文化# 当前已有任务运行，本次跳过")
             return
         action = str(config.get("action", "preview")).strip().lower()
         started = datetime.now()
@@ -250,7 +289,7 @@ class EmbyActorChinese(_PluginBase):
             item_type = str(config.get("media_type", "auto")).strip().lower()
             if item_type not in {"auto", "movie", "series"}:
                 raise ValueError("MEDIA_TYPE_INVALID")
-            logger.info(f"#Emby演员中文化# 开始{('预览' if action == 'preview' else '同步')} | 影视={title} | 年份={year}")
+            logger.info(f"#Emby角色中文化# 开始{('预览' if action == 'preview' else '同步')} | 影视={title} | 年份={year}")
             summary = self._client.search_items(title, item_type)
             selected = self.select_exact_item(summary, title, year)
             item_id = str(selected.get("Id") or "")
@@ -267,17 +306,18 @@ class EmbyActorChinese(_PluginBase):
                     raise ValueError("DOUBAN_ID_MISMATCH")
             updated_people, changes, stats = self._build_actor_mapping_detailed(detail.get("People") or [], credits)
             logger.info(
-                "#Emby演员中文化# 匹配统计 | "
-                f"Emby演员={stats['emby_actors']} | Emby英文名={stats['emby_english']} | "
-                f"豆瓣演员={stats['douban_credits']} | 豆瓣拉丁名={stats['douban_latin']} | "
-                f"精确匹配={stats['exact']} | 姓名顺序变体={stats['order_variant']} | "
-                f"歧义跳过={stats['ambiguous']} | 未匹配={stats['unmatched']}"
+                "#Emby角色中文化# 匹配统计 | "
+                f"Emby演员={stats['emby_actors']} | 中文演员名={stats['emby_chinese']} | 英文演员名={stats['emby_english']} | "
+                f"豆瓣演员={stats['douban_credits']} | 豆瓣中文角色={stats['douban_roles']} | "
+                f"中文姓名匹配={stats['chinese_name']} | 拉丁名匹配={stats['exact']} | 姓名顺序变体={stats['order_variant']} | "
+                f"无角色跳过={stats['no_role']} | 歧义跳过={stats['ambiguous']} | 未匹配={stats['unmatched']}"
             )
             if not changes:
-                raise ValueError("NO_SAFE_ACTOR_MATCH")
+                raise ValueError("NO_SAFE_ROLE_MATCH")
             for change in changes:
                 logger.info(
-                    f"#Emby演员中文化# 演员匹配 | {self._safe_text(change['from'])} => {self._safe_text(change['to'])}"
+                    f"#Emby角色中文化# 角色匹配 | 演员={self._safe_text(change['actor'])} | "
+                    f"原角色={self._safe_text(change['from']) or '(空)'} => 中文角色={self._safe_text(change['to'])}"
                 )
 
             status = "预览完成"
@@ -298,7 +338,7 @@ class EmbyActorChinese(_PluginBase):
                 if any(
                     change["index"] >= len(actual)
                     or not isinstance(actual[change["index"]], dict)
-                    or actual[change["index"]].get("Name") != change["to"]
+                    or actual[change["index"]].get("Role") != change["to"]
                     for change in changes
                 ):
                     try:
@@ -308,13 +348,13 @@ class EmbyActorChinese(_PluginBase):
                     raise ValueError("VERIFY_FAILED_ROLLED_BACK")
                 status = "同步成功"
             logger.info(
-                f"#Emby演员中文化# {status} | Emby={self._safe_text(detail.get('Name') or title)} "
-                f"| 豆瓣={self._safe_text(douban_title)} | 豆瓣ID={douban_id} | 演员修改={len(changes)}"
+                f"#Emby角色中文化# {status} | Emby={self._safe_text(detail.get('Name') or title)} "
+                f"| 豆瓣={self._safe_text(douban_title)} | 豆瓣ID={douban_id} | 角色修改={len(changes)}"
             )
             self._record(status, title, year, len(changes), changes, "OK")
         except Exception as exc:
             code = self._safe_code(exc)
-            logger.error(f"#Emby演员中文化# 任务失败 [{code}]")
+            logger.error(f"#Emby角色中文化# 任务失败 [{code}]")
             self._record("失败", self._safe_text(config.get("title", "")), config.get("year", ""), 0, [], code)
         finally:
             self._run_lock.release()
@@ -327,7 +367,7 @@ class EmbyActorChinese(_PluginBase):
             "title": self._safe_text(title),
             "year": str(year)[:4],
             "count": int(count),
-            "changes": [f"{item['from']} → {item['to']}" for item in changes[:50]],
+            "changes": [f"{item['actor']}：{item['from'] or '(空)'} → {item['to']}" for item in changes[:50]],
             "code": code,
         })
         self.save_data("history", history[:100])
@@ -391,7 +431,7 @@ class EmbyActorChinese(_PluginBase):
             "component": "VCol", "props": {"cols": 12}, "content": [{
                 "component": "VAlert", "props": {
                     "type": "warning", "variant": "tonal",
-                    "text": "测试版仅处理一部影视。默认“仅预览”不会写入Emby；确认匹配结果后再选择“确认同步”。只修改英文演员名，无法按豆瓣拉丁名唯一匹配的演员会跳过。",
+                    "text": "测试版仅处理一部影视。默认“仅预览”不会写入Emby；确认匹配结果后再选择“确认同步”。只修改演员的角色名Role，不修改演员姓名Name；无法与豆瓣演员唯一对应或没有中文角色的数据会跳过。",
                 }
             }]
         }]}]

@@ -23,31 +23,38 @@ def test_actor_mapping_is_unique_exact_and_actor_only():
         {"Name": "Ambiguous Name", "Type": "Actor"},
     ]
     credits = [
-        types.SimpleNamespace(name="汤姆·汉克斯", latin_name="Tom Hanks"),
-        types.SimpleNamespace(name="甲", latin_name="Ambiguous Name"),
-        types.SimpleNamespace(name="乙", latin_name="Ambiguous-Name"),
+        types.SimpleNamespace(name="汤姆·汉克斯", latin_name="Tom Hanks", roles=["饰 阿甘"]),
+        types.SimpleNamespace(name="周迅", latin_name="Zhou Xun", roles=[{"character": "如懿"}]),
+        types.SimpleNamespace(name="甲", latin_name="Ambiguous Name", roles=["甲角色"]),
+        types.SimpleNamespace(name="乙", latin_name="Ambiguous-Name", roles=["乙角色"]),
     ]
     updated, changes = EmbyActorChinese.build_actor_mapping(people, credits)
-    assert updated[0]["Name"] == "汤姆·汉克斯"
-    assert updated[0]["Role"] == "Forrest"
+    assert updated[0]["Name"] == "Tom Hanks"
+    assert updated[0]["Role"] == "阿甘"
     assert updated[1]["Name"] == "Robert Zemeckis"
     assert updated[2]["Name"] == "周迅"
+    assert updated[2]["Role"] == "如懿"
     assert updated[3]["Name"] == "Ambiguous Name"
-    assert changes == [{"index": 0, "from": "Tom Hanks", "to": "汤姆·汉克斯", "method": "exact"}]
+    assert changes == [
+        {"index": 0, "actor": "Tom Hanks", "from": "Forrest", "to": "阿甘", "method": "exact"},
+        {"index": 2, "actor": "周迅", "from": "", "to": "如懿", "method": "chinese_name"},
+    ]
     assert people[0]["Name"] == "Tom Hanks"
+    assert people[0]["Role"] == "Forrest"
 
 
 def test_actor_mapping_accepts_only_unique_surname_order_variants():
     people = [
-        {"Name": "Meng Ziyi", "Type": "Actor"},
-        {"Name": "Timothee Chalamet", "Type": "Actor"},
+        {"Name": "Meng Ziyi", "Type": "Actor", "Role": "Old"},
+        {"Name": "Timothee Chalamet", "Type": "Actor", "Role": "Paul"},
     ]
     credits = [
-        types.SimpleNamespace(name="孟子义", latin_name="Zi-yi Meng", also_known_as=[]),
-        types.SimpleNamespace(name="提莫西·查拉梅", latin_name="Timothée Chalamet", also_known_as=[]),
+        types.SimpleNamespace(name="孟子义", latin_name="Zi-yi Meng", also_known_as=[], roles=["花如月"]),
+        types.SimpleNamespace(name="提莫西·查拉梅", latin_name="Timothée Chalamet", also_known_as=[], roles=["保罗"]),
     ]
     updated, changes, stats = EmbyActorChinese._build_actor_mapping_detailed(people, credits)
-    assert [person["Name"] for person in updated] == ["孟子义", "提莫西·查拉梅"]
+    assert [person["Name"] for person in updated] == ["Meng Ziyi", "Timothee Chalamet"]
+    assert [person["Role"] for person in updated] == ["花如月", "保罗"]
     assert stats["order_variant"] == 1
     assert stats["exact"] == 1
     assert len(changes) == 2
@@ -124,7 +131,7 @@ def test_preview_never_writes_and_sync_verifies_write():
             self.item = {
                 "Id": "1", "Name": "沙丘", "Type": "Movie", "ProductionYear": 2021,
                 "ProviderIds": {"Douban": "3001114"},
-                "People": [{"Name": "Timothee Chalamet", "Type": "Actor"}],
+                "People": [{"Name": "提莫西·查拉梅", "Type": "Actor", "Role": "Paul Atreides"}],
             }
             self.writes = 0
 
@@ -146,7 +153,9 @@ def test_preview_never_writes_and_sync_verifies_write():
     plugin = EmbyActorChinese()
     plugin._client = client
     plugin._load_douban_credits = lambda *_args: (
-        "3001114", "沙丘", [types.SimpleNamespace(name="提莫西·查拉梅", latin_name="Timothee Chalamet")]
+        "3001114", "沙丘", [types.SimpleNamespace(
+            name="提莫西·查拉梅", latin_name="Timothee Chalamet", roles=["保罗·厄崔迪"]
+        )]
     )
     base = {"title": "沙丘", "year": 2021, "media_type": "movie"}
     plugin.run_test({**base, "action": "preview"})
@@ -155,5 +164,7 @@ def test_preview_never_writes_and_sync_verifies_write():
     plugin.run_test({**base, "action": "sync"})
     assert client.writes == 1
     assert client.item["People"][0]["Name"] == "提莫西·查拉梅"
+    assert client.item["People"][0]["Role"] == "保罗·厄崔迪"
     assert plugin.get_data("history")[0]["status"] == "同步成功"
-    assert plugin.get_data("last_backup")["people"][0]["Name"] == "Timothee Chalamet"
+    assert plugin.get_data("last_backup")["people"][0]["Name"] == "提莫西·查拉梅"
+    assert plugin.get_data("last_backup")["people"][0]["Role"] == "Paul Atreides"
