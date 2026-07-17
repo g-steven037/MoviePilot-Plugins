@@ -54,5 +54,18 @@
       "v0.1.1": "放宽Pillow与requests依赖约束，兼容MoviePilot共享环境中的较新版本",
       "v0.1.0": "首次发布：支持两种横版媒体库封面样式、Cron定时生成、立即运行、可选安全上传及处理历史"
     }
+  },
+  "DownloadCapacityGuard": {
+    "name": "下载容量控制",
+    "description": "监控VPS本地磁盘容量，在下载任务提交前拦截可能导致容量不足的PT下载，仅自用测试。",
+    "labels": "下载,磁盘,容量,PT",
+    "version": "0.1.0",
+    "icon": "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/download-capacity-guard.svg",
+    "author": "g-steven037",
+    "level": 1,
+    "v2": true,
+    "history": {
+      "v0.1.0": "首次发布：下载前同步拦截，综合磁盘空闲、保留空间、未完成任务剩余量、安全倍率及并发短期预留判断是否允许下载"
+    }
   }
 }
