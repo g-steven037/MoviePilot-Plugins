@@ -134,5 +134,8 @@ def test_guard_form_defaults_are_fail_closed():
     assert defaults["reserve_gb"] == 10
     assert defaults["size_multiplier_percent"] == 105
     assert defaults["reservation_seconds"] == 120
-    assert "下载器提交任务前同步检查容量" in serialized
+    assert "cron" not in defaults
+    assert "Cron" not in serialized
+    assert "不创建定时任务" in serialized
     assert "本地磁盘监控路径" in serialized
+    assert plugin.get_service() == []
