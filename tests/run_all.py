@@ -40,6 +40,8 @@ def main() -> int:
     plugin.test_realtime_failure_then_retry_success_keeps_pt_file(temporary_path())
     plugin.test_retry_exhaustion_delete_switch_is_safe_and_keeps_pt_file(temporary_path())
     plugin.test_verified_unlink_rejects_replaced_file(temporary_path())
+    plugin.test_dependency_manifest_uses_correct_asynctools_distribution()
+    plugin.test_cached_legacy_asynctools_is_reloaded_after_install()
     emby.test_url_and_api_key_are_hardened()
     emby.test_library_mapping_is_bounded_and_supports_line_breaks()
     emby.test_form_defaults_to_generation_only_and_password_field()
@@ -50,7 +52,7 @@ def main() -> int:
     emby.test_embedded_font_exists_and_renders_chinese(temporary_path())
     emby.test_visual_config_is_validated_and_applied()
     emby.test_safe_filename_does_not_escape_output_directory()
-    print("All 29 unit, security, rendering, and realtime integration tests passed.")
+    print("All 31 unit, security, rendering, and realtime integration tests passed.")
     return 0
 
 
