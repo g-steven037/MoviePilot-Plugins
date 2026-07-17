@@ -37,6 +37,7 @@ def main() -> int:
     plugin.test_risk_control_persists_and_cookie_change_releases_auth_block()
     plugin.test_brief_log_contains_only_required_fields(temporary_path())
     plugin.test_scheduled_empty_cleanup_never_deletes_roots_or_nonempty_dirs(temporary_path())
+    plugin.test_manual_rapid_and_retry_actions_use_the_worker_queue()
     plugin.test_realtime_failure_then_retry_success_keeps_pt_file(temporary_path())
     plugin.test_retry_exhaustion_delete_switch_is_safe_and_keeps_pt_file(temporary_path())
     plugin.test_verified_unlink_rejects_replaced_file(temporary_path())
@@ -52,9 +53,10 @@ def main() -> int:
     emby.test_embedded_font_exists_and_renders_chinese(temporary_path())
     emby.test_visual_config_is_validated_and_applied()
     emby.test_safe_filename_does_not_escape_output_directory()
-    print("All 31 unit, security, rendering, and realtime integration tests passed.")
+    print("All 32 unit, security, rendering, and realtime integration tests passed.")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
