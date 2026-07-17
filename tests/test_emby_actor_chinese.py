@@ -23,8 +23,8 @@ def test_actor_mapping_is_unique_exact_and_actor_only():
         {"Name": "Ambiguous Name", "Type": "Actor"},
     ]
     credits = [
-        types.SimpleNamespace(name="汤姆·汉克斯", latin_name="Tom Hanks", roles=["饰 阿甘"]),
-        types.SimpleNamespace(name="周迅", latin_name="Zhou Xun", roles=[{"character": "如懿"}]),
+        types.SimpleNamespace(name="汤姆·汉克斯", latin_name="Tom Hanks", character="饰 阿甘", roles=["演员"]),
+        types.SimpleNamespace(name="周迅", latin_name="Zhou Xun", character="如懿", roles=["演员"]),
         types.SimpleNamespace(name="甲", latin_name="Ambiguous Name", roles=["甲角色"]),
         types.SimpleNamespace(name="乙", latin_name="Ambiguous-Name", roles=["乙角色"]),
     ]
@@ -49,14 +49,16 @@ def test_actor_mapping_accepts_only_unique_surname_order_variants():
         {"Name": "Timothee Chalamet", "Type": "Actor", "Role": "Paul"},
     ]
     credits = [
-        types.SimpleNamespace(name="孟子义", latin_name="Zi-yi Meng", also_known_as=[], roles=["花如月"]),
-        types.SimpleNamespace(name="提莫西·查拉梅", latin_name="Timothée Chalamet", also_known_as=[], roles=["保罗"]),
+        types.SimpleNamespace(name="孟子义", latin_name="Zi-yi Meng", also_known_as=[], character="饰 花如月", roles=["演员"]),
+        types.SimpleNamespace(name="提莫西·查拉梅", latin_name="Timothée Chalamet", also_known_as=[], character="保罗", roles=["演员"]),
     ]
     updated, changes, stats = EmbyActorChinese._build_actor_mapping_detailed(people, credits)
     assert [person["Name"] for person in updated] == ["Meng Ziyi", "Timothee Chalamet"]
     assert [person["Role"] for person in updated] == ["花如月", "保罗"]
     assert stats["order_variant"] == 1
     assert stats["exact"] == 1
+    assert stats["character_roles"] == 2
+    assert stats["roles_fallback"] == 0
     assert len(changes) == 2
 
 
@@ -154,7 +156,8 @@ def test_preview_never_writes_and_sync_verifies_write():
     plugin._client = client
     plugin._load_douban_credits = lambda *_args: (
         "3001114", "沙丘", [types.SimpleNamespace(
-            name="提莫西·查拉梅", latin_name="Timothee Chalamet", roles=["保罗·厄崔迪"]
+            name="提莫西·查拉梅", latin_name="Timothee Chalamet",
+            character="饰 保罗·厄崔迪", roles=["演员"]
         )]
     )
     base = {"title": "沙丘", "year": 2021, "media_type": "movie"}

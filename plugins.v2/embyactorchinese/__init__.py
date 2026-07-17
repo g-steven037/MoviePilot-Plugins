@@ -17,7 +17,7 @@ class EmbyActorChinese(_PluginBase):
     plugin_name = "Emby角色中文化"
     plugin_desc = "按影视名称和年份匹配豆瓣演职员表，将演员角色名中文化并同步到Emby，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/emby-actor-chinese.svg"
-    plugin_version = "0.2.0"
+    plugin_version = "0.2.1"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "embyactorchinese_"
@@ -158,11 +158,15 @@ class EmbyActorChinese(_PluginBase):
             if isinstance(aliases, list):
                 candidates.extend(str(alias or "").strip() for alias in aliases[:20])
             candidates = [name for name in candidates if name and not cls._contains_cjk(name)]
-            role = cls._extract_chinese_role(getter("roles", []))
+            role = cls._extract_chinese_role(getter("character", ""))
+            role_source = "character" if role else ""
+            if not role:
+                role = cls._extract_chinese_role(getter("roles", []))
+                role_source = "roles" if role else ""
             if not cls._contains_cjk(chinese):
                 continue
             record_id = len(records)
-            records.append({"name": chinese, "role": role})
+            records.append({"name": chinese, "role": role, "role_source": role_source})
             chinese_key = cls._normalize_name(chinese)
             if chinese_key:
                 chinese_aliases.setdefault(chinese_key, set()).add(record_id)
@@ -181,6 +185,8 @@ class EmbyActorChinese(_PluginBase):
             "emby_actors": 0, "emby_chinese": 0, "emby_english": 0,
             "douban_credits": min(len(credits), 500), "douban_latin": latin_credit_count,
             "douban_roles": sum(1 for record in records if record["role"]),
+            "character_roles": sum(1 for record in records if record["role_source"] == "character"),
+            "roles_fallback": sum(1 for record in records if record["role_source"] == "roles"),
             "chinese_name": 0, "exact": 0, "order_variant": 0,
             "ambiguous": 0, "unmatched": 0, "no_role": 0,
         }
@@ -308,7 +314,8 @@ class EmbyActorChinese(_PluginBase):
             logger.info(
                 "#Emby角色中文化# 匹配统计 | "
                 f"Emby演员={stats['emby_actors']} | 中文演员名={stats['emby_chinese']} | 英文演员名={stats['emby_english']} | "
-                f"豆瓣演员={stats['douban_credits']} | 豆瓣中文角色={stats['douban_roles']} | "
+                f"豆瓣演员={stats['douban_credits']} | 豆瓣中文角色={stats['douban_roles']} "
+                f"(character={stats['character_roles']},兼容字段={stats['roles_fallback']}) | "
                 f"中文姓名匹配={stats['chinese_name']} | 拉丁名匹配={stats['exact']} | 姓名顺序变体={stats['order_variant']} | "
                 f"无角色跳过={stats['no_role']} | 歧义跳过={stats['ambiguous']} | 未匹配={stats['unmatched']}"
             )
