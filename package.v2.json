@@ -68,5 +68,19 @@
       "v0.1.1": "取消Cron定时容量检查，改为仅在MoviePilot准备提交下载任务时即时检查并输出放行或拒绝日志",
       "v0.1.0": "首次发布：下载前同步拦截，综合磁盘空闲、保留空间、未完成任务剩余量、安全倍率及并发短期预留判断是否允许下载"
     }
+  },
+  "DramaCalendar": {
+    "name": "追剧更新日历",
+    "description": "读取Emby/Jellyfin剧集与TMDB排期，定时向MoviePilot管理员发送未来更新日历，仅自用测试。",
+    "labels": "Emby,Jellyfin,TMDB,日历,通知",
+    "version": "0.1.0",
+    "icon": "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/drama-calendar.svg",
+    "author": "g-steven037",
+    "level": 1,
+    "v2": true,
+    "system_version": ">=2.14.4,<3",
+    "history": {
+      "v0.1.0": "首次发布：自动读取MoviePilot媒体服务器和TMDB配置，支持Cron、立即运行、未来排期、入库状态、SQLite单文件缓存、限流重试及脱敏日志，不注册Bot命令"
+    }
   }
 }
