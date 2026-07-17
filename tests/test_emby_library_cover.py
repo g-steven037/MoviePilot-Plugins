@@ -121,6 +121,11 @@ def test_form_defaults_to_generation_only_and_password_field():
     assert "'show': '{{use_mp_config}}'" in serialized
     assert "'show': '{{!use_mp_config}}'" in serialized
     assert "'show': '{{upload_enabled}}'" in serialized
+    assert "标题排版对照设置" in serialized
+    assert "Style 1 经典横排独立设置" in serialized
+    assert "Style 2 倾斜海报墙独立设置" in serialized
+    assert serialized.count("Style 1 中文字号") == 1
+    assert serialized.count("Style 2 中文字号") == 1
     assert defaults["s1_en_letter_spacing"] == 10
     assert defaults["s2_en_letter_spacing"] == 6
     assert defaults["s1_title_gap"] == 20
