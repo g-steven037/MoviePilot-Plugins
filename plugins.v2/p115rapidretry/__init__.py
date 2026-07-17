@@ -64,7 +64,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "（仅自用）监控目录，秒传失败时转移到临时目录，定时重试，秒传成功后删除本地文件，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
@@ -426,7 +426,377 @@ class P115RapidRetry(_PluginBase):
     def _safe_directory_stat(path: Path) -> os.stat_result:
         value = path.lstat()
         attributes = getattr(value, "st_file_attributes", 0)
-        reparse_marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE…4517 tokens truncated…D")
+        reparse_marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode) or bool(attributes & reparse_marker):
+            raise ValueError("DIRECTORY_LINK_UNSAFE")
+        return value
+
+    @staticmethod
+    def _safe_code(exc: Exception) -> str:
+        text = str(exc)
+        if text and text.isupper() and " " not in text and len(text) <= 64:
+            return text
+        return type(exc).__name__.upper()[:64]
+
+    def get_state(self) -> bool:
+        return self._enabled
+
+    def get_service(self) -> Optional[List[Dict[str, Any]]]:
+        if not self._enabled:
+            return None
+        services = [{
+            "id": "P115RapidRetry_retry",
+            "name": "115秒传临时目录限速重试",
+            "trigger": CronTrigger.from_crontab(self._cron),
+            "func": self.retry_pending,
+            "kwargs": {},
+        }]
+        if self._empty_cleanup_enabled:
+            services.append({
+                "id": "P115RapidRetry_empty_cleanup",
+                "name": "115秒传定时清理空文件夹",
+                "trigger": CronTrigger.from_crontab(self._empty_cleanup_cron),
+                "func": self.cleanup_empty_directories,
+                "kwargs": {},
+            })
+        return services
+
+    def _start_realtime_monitor(self, queue_existing: bool = True):
+        self._stop_event = threading.Event()
+        self._events = queue.Queue(maxsize=1024)
+        self._overflow = False
+        self._worker = threading.Thread(target=self._worker_loop, name="p115-rapid-worker", daemon=True)
+        self._worker.start()
+        observer = Observer()
+        observer.schedule(_WatchHandler(self), str(self._watch_dir), recursive=True)
+        observer.start()
+        self._observer = observer
+        logger.info("115秒传重试：安全实时监控已启动")
+        if queue_existing:
+            self._queue_existing_files()
+
+    def _put_event(self, action: str, path: Path):
+        if not self._enabled:
+            return False
+        try:
+            self._events.put_nowait((action, str(path)))
+            return True
+        except queue.Full:
+            self._overflow = True
+            return False
+
+    def _put_control_event(self, action: str) -> bool:
+        if action not in {"scan_now", "retry_now"}:
+            return False
+        queued = self._put_event(action, Path())
+        if not queued:
+            logger.warning(f"#115秒传# 立即任务提交失败 | 任务={action} | 代码=QUEUE_OVERFLOW")
+        return queued
+
+    def queue_watch_file(self, path: Path):
+        if ".p115-delete-" in path.name:
+            return False
+        return self._put_event("upsert", path)
+
+    def cancel_watch_file(self, path: Path):
+        self._put_event("cancel", path)
+
+    def _queue_existing_files(self, manual: bool = False) -> int:
+        discovered = 0
+        queued = 0
+        try:
+            for path in self._watch_dir.rglob("*"):
+                if path.is_file():
+                    discovered += 1
+                    if self.queue_watch_file(path):
+                        queued += 1
+        except OSError:
+            self._record("QUEUE_SCAN", False, "QUEUE_OVERFLOW")
+        if manual:
+            logger.info(
+                f"#115秒传# 立即运行秒传扫描完成 | 发现文件={discovered} | 已提交={queued}"
+            )
+        return queued
+
+    def _worker_loop(self):
+        pending: Dict[str, float] = {}
+        while not self._stop_event.is_set():
+            try:
+                action, raw_path = self._events.get(timeout=0.5)
+                if action == "stop":
+                    break
+                if action == "scan_now":
+                    logger.info("#115秒传# 开始立即运行秒传")
+                    self._queue_existing_files(manual=True)
+                elif action == "retry_now":
+                    self.retry_pending(manual=True)
+                elif action == "cancel":
+                    pending.pop(raw_path, None)
+                elif len(pending) < 4096:
+                    pending[raw_path] = monotonic() + self._stable_seconds
+                else:
+                    self._overflow = True
+            except queue.Empty:
+                pass
+
+            now = monotonic()
+            due = [raw for raw, deadline in pending.items() if deadline <= now]
+            for raw in due[:1]:
+                pending.pop(raw, None)
+                self._process_watch_file(Path(raw))
+
+            if self._overflow and self._events.empty() and len(pending) < 2048:
+                self._overflow = False
+                self._record("QUEUE_OVERFLOW", False, "QUEUE_OVERFLOW")
+                self._queue_existing_files()
+
+    def _process_watch_file(self, path: Path):
+        if not self._enabled or not self._client:
+            return
+        try:
+            identity = secure_identity(path, self._watch_dir, require_hardlink=True)
+            if time() - path.stat().st_mtime < self._stable_seconds:
+                self.queue_watch_file(path)
+                return
+        except (OSError, ValueError) as exc:
+            self._record(self._task_id(path, self._watch_dir), False, self._safe_code(exc))
+            return
+        with self._operation_lock:
+            self._handle(path, self._watch_dir, identity, from_retry=False)
+
+    def retry_pending(self, manual: bool = False):
+        if not self._enabled or not self._client or self._auth_blocked or time() < self._circuit_until:
+            if manual:
+                logger.warning("#115秒传# 立即重试未执行 | 代码=CIRCUIT_OPEN")
+            return
+        if not self._operation_lock.acquire(blocking=False):
+            if manual:
+                logger.warning("#115秒传# 立即重试未执行 | 代码=OPERATION_BUSY")
+            return
+        try:
+            if manual:
+                logger.info("#115秒传# 开始立即重试秒传")
+            state = self.get_data("retry_state") or {}
+            files = self._secure_files(self._retry_dir)
+            active_ids = {self._task_id(path, self._retry_dir) for path in files}
+            pruned = {key: value for key, value in state.items() if key in active_ids}
+            if pruned != state:
+                self.save_data("retry_state", pruned)
+            state = pruned
+            eligible = [
+                path for path in files
+                if not bool(state.get(self._task_id(path, self._retry_dir), {}).get("exhausted", False))
+            ]
+            exhausted_cleanup = [
+                path for path in files
+                if self._delete_exhausted_enabled
+                and bool(state.get(self._task_id(path, self._retry_dir), {}).get("exhausted", False))
+            ]
+            if self._detailed_logs:
+                submitted = min(len(eligible) + len(exhausted_cleanup), self._max_batch)
+                logger.info(
+                    f"#115秒传# 临时目录扫描完成，共发现 {len(files)} 个文件，本轮提交 {submitted} 个任务"
+                    f"（可重试={len(eligible)}，耗尽清理={len(exhausted_cleanup)}）"
+                )
+            processed = 0
+            for path in files:
+                task_id = self._task_id(path, self._retry_dir)
+                task_state = state.get(task_id, {})
+                if bool(task_state.get("exhausted", False)):
+                    if self._delete_exhausted_enabled:
+                        self._delete_previously_exhausted(path, task_id, task_state)
+                        processed += 1
+                        if processed >= self._max_batch:
+                            break
+                    continue
+                self._handle(path, self._retry_dir, None, from_retry=True)
+                processed += 1
+                if processed >= self._max_batch or self._auth_blocked or time() < self._circuit_until:
+                    break
+            if manual:
+                logger.info(f"#115秒传# 立即重试秒传完成 | 本轮处理={processed}")
+        finally:
+            self._operation_lock.release()
+
+    def _delete_previously_exhausted(self, path: Path, task_id: str, task_state: Dict[str, Any]) -> bool:
+        filename = self._safe_log_value(path.name)
+        attempts = min(max(int(task_state.get("attempts", self._max_retries)), 0), 1000)
+        code = self._normalize_code(str(task_state.get("code", "RAPID_MISS")))
+        try:
+            identity = secure_identity(path, self._retry_dir, require_hardlink=False)
+        except (OSError, ValueError):
+            logger.warning(
+                f"#115秒传# [简短] 重试耗尽清理=安全校验失败 | 文件={filename} | "
+                f"重试次数={attempts}/{self._max_retries}"
+            )
+            return False
+        if not self._verified_unlink(path, identity, self._retry_dir):
+            logger.warning(
+                f"#115秒传# [简短] 重试耗尽清理=删除失败 | 文件={filename} | "
+                f"重试次数={attempts}/{self._max_retries}"
+            )
+            return False
+        self._clear_retry_state(task_id)
+        self._sha1_cache.pop(identity, None)
+        if self._detailed_logs:
+            logger.warning(f"#115秒传# 已安全删除此前重试耗尽的失败文件: {filename}")
+        else:
+            logger.warning(
+                f"#115秒传# [简短] 重试耗尽清理=已删除 | 文件={filename} | "
+                f"重试次数={attempts}/{self._max_retries}"
+            )
+        self._remove_empty_parent_dirs(path.parent, self._retry_dir)
+        self._send_bot_exhausted(path, attempts, code, deleted=True, delete_requested=True)
+        return True
+
+    @staticmethod
+    def _secure_files(root: Path):
+        found = []
+        try:
+            for path in root.rglob("*"):
+                try:
+                    secure_identity(path, root, require_hardlink=False)
+                    found.append(path)
+                except (OSError, ValueError):
+                    continue
+        except OSError:
+            return []
+        return sorted(found)
+
+    def _handle(self, path: Path, root: Path, identity: FileIdentity | None, from_retry: bool):
+        task_id = self._task_id(path, root)
+        source = "重试" if from_retry else "后台线程"
+        filename = self._safe_log_value(path.name)
+        retry_state = (self.get_data("retry_state") or {}).get(task_id, {})
+        attempt_no = int(retry_state.get("attempts", 0)) + 1 if from_retry else 0
+        if self._detailed_logs:
+            logger.info(f"#115秒传# [{source}-{threading.current_thread().name}] {'重试秒传' if from_retry else '开始秒传'}: {filename}")
+        if self._auth_blocked or time() < self._circuit_until:
+            result = RapidResult(False, True, "CIRCUIT_OPEN", identity)
+        else:
+            cache_identity = identity
+            if cache_identity is None:
+                try:
+                    cache_identity = secure_identity(path, root, require_hardlink=False)
+                except (OSError, ValueError):
+                    cache_identity = None
+            known_sha1 = self._sha1_cache.get(cache_identity) if cache_identity else None
+
+            def progress(event: str):
+                if not self._detailed_logs:
+                    return
+                if event == "SHA1_START":
+                    logger.info(f"#115秒传# 开始计算SHA1: {filename}")
+                elif event == "SHA1_DONE":
+                    logger.info(f"#115秒传# SHA1计算完成: {filename}")
+                elif event == "SHA1_CACHE":
+                    logger.info(f"#115秒传# 从缓存加载SHA1: {filename}")
+
+            result = try_rapid_upload(
+                self._client, path, self._target_pid, root=root,
+                require_hardlink=not from_retry,
+                known_sha1=known_sha1,
+                progress=progress,
+                request_guard=self._acquire_request_slot,
+            )
+        identity = result.identity or identity
+        if identity and result.sha1:
+            if len(self._sha1_cache) >= 4096 and identity not in self._sha1_cache:
+                self._sha1_cache.clear()
+            self._sha1_cache[identity] = result.sha1
+        self._record(task_id, result.success, result.code)
+        self._audit_rapid(path, root, result, from_retry, attempt_no)
+
+        self._apply_risk_result(result)
+
+        if result.success:
+            if identity and self._verified_unlink(path, identity, root):
+                self._clear_retry_state(task_id)
+                self._sha1_cache.pop(identity, None)
+                if from_retry:
+                    if self._detailed_logs:
+                        logger.info(f"#115秒传# 重试秒传成功后删除源文件: {filename}")
+                        logger.info(f"#115秒传# [重试-{threading.current_thread().name}] 重试成功: {filename}")
+                else:
+                    if self._detailed_logs:
+                        logger.info(f"#115秒传# 秒传成功后删除硬链接文件: {filename}")
+                self._send_bot_success(path, from_retry, cleanup_success=True)
+                self._remove_empty_parent_dirs(path.parent, root)
+            else:
+                self._record(task_id, False, "FILE_CHANGED")
+                logger.warning(
+                    f"#115秒传# {'秒传成功但本地文件身份变化，未删除' if self._detailed_logs else '[简短] 本地清理失败'}: {filename}"
+                )
+                self._send_bot_success(path, from_retry, cleanup_success=False)
+            return
+
+        if from_retry:
+            if result.code == "CIRCUIT_OPEN":
+                return
+            attempts, exhausted = self._schedule_retry(task_id, result.code)
+            if exhausted:
+                self._record(task_id, False, "RETRY_EXHAUSTED")
+                deleted = False
+                if self._delete_exhausted_enabled and identity:
+                    deleted = self._verified_unlink(path, identity, root)
+                if deleted:
+                    self._clear_retry_state(task_id)
+                    self._sha1_cache.pop(identity, None)
+                    if self._detailed_logs:
+                        logger.warning(
+                            f"#115秒传# 已达到最大重试次数({attempts}/{self._max_retries})，"
+                            f"已安全删除失败文件: {filename}"
+                        )
+                    else:
+                        logger.warning(
+                            f"#115秒传# [简短] 重试耗尽清理=已删除 | 文件={filename} | "
+                            f"重试次数={attempts}/{self._max_retries}"
+                        )
+                    self._remove_empty_parent_dirs(path.parent, root)
+                else:
+                    cleanup_state = "安全校验失败，文件已保留" if self._delete_exhausted_enabled else "文件已保留"
+                    logger.warning(
+                        f"#115秒传# {'已达到最大重试次数' if self._detailed_logs else '[简短] 重试已达上限'}"
+                        f"({attempts}/{self._max_retries})，停止自动重试，{cleanup_state}: {filename}"
+                    )
+                self._send_bot_exhausted(
+                    path, attempts, result.code,
+                    deleted=deleted,
+                    delete_requested=self._delete_exhausted_enabled,
+                )
+            return
+        if not result.retryable or not identity or not same_identity(path, identity, root):
+            return
+        self._move_to_retry(path, identity, task_id)
+
+    def _move_to_retry(self, path: Path, identity: FileIdentity, task_id: str):
+        try:
+            relative = path.resolve(strict=True).relative_to(self._watch_dir)
+            destination = self._unique_destination(self._retry_dir / relative)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.parent.resolve(strict=True).relative_to(self._retry_dir)
+            if path.stat().st_dev != destination.parent.stat().st_dev:
+                raise OSError("CROSS_DEVICE")
+            if not same_identity(path, identity, self._watch_dir):
+                self._record(task_id, False, "FILE_CHANGED")
+                return
+            os.replace(path, destination)
+            if not same_identity(destination, identity, self._retry_dir):
+                if not path.exists():
+                    os.replace(destination, path)
+                self._record(task_id, False, "FILE_CHANGED")
+                return
+            self._initialize_retry(self._task_id(destination, self._retry_dir), "RAPID_MISS")
+            if self._detailed_logs:
+                logger.info(f"#115秒传# 文件已移动到临时目录: {self._safe_log_value(destination)}")
+                logger.info(f"#115秒传# [后台线程-{threading.current_thread().name}] 文件处理完成(移至临时目录): {self._safe_log_value(destination.name)}")
+            else:
+                logger.info(
+                    f"#115秒传# [简短] 已转移临时文件夹 | 文件={self._safe_log_value(destination.name)} | "
+                    f"临时目录={self._safe_log_value(destination.parent)}"
+                )
+        except (OSError, ValueError):
+            self._record(task_id, False, "MOVE_FAILED")
             logger.warning(f"#115秒传# 移动到临时目录失败: {self._safe_log_value(path.name)}")
 
     @staticmethod
