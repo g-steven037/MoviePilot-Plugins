@@ -138,4 +138,3 @@ https://github.com/g-steven037/MoviePilot-Plugins
 ## 字体许可
 
 中文字体基于 Noto Fonts 官方 `NotoSansCJKsc-Bold.otf` 制作 GBK 字符子集并重命名为 `MoviePilotCJKsc-Bold.otf`，英文使用 `Melete-Bold.otf`，均按 SIL Open Font License 1.1 再分发。为兼容 MoviePilot v2.14.2 将二进制资源按UTF-8文本写入的安装器，两份字体以 gzip + Base64 文本保存，启动时在配置目录本地解码并校验 SHA-256；字体缺失、损坏或无法加载时插件会明确报错，不再静默回退生成方框。许可证位于 `fonts/OFL-NotoSansCJK.txt` 和 `fonts/OFL-Melete.txt`。
-
