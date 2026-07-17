@@ -585,4 +585,3 @@ def test_cached_legacy_asynctools_is_reloaded_after_install():
     )
     assert result is modern
     assert calls == [legacy]
-
