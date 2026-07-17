@@ -1,5 +1,7 @@
 import os
+import queue
 import sys
+import threading
 import time
 import types
 from pathlib import Path
@@ -389,6 +391,35 @@ def test_scheduled_empty_cleanup_never_deletes_roots_or_nonempty_dirs(tmp_path: 
     assert "重试耗尽后删除文件及空文件夹" in str(form)
 
 
+def test_manual_rapid_and_retry_actions_use_the_worker_queue():
+    _install_stubs()
+    plugin_root = Path(__file__).parents[1] / "plugins.v2"
+    sys.path.insert(0, str(plugin_root))
+    from p115rapidretry import P115RapidRetry
+
+    plugin = P115RapidRetry()
+    plugin._enabled = True
+    plugin._events = queue.Queue(maxsize=8)
+    plugin._stop_event = threading.Event()
+    plugin._overflow = False
+    calls = []
+    plugin.retry_pending = lambda manual=False: calls.append(("retry", manual))
+    plugin._queue_existing_files = lambda manual=False: calls.append(("rapid", manual)) or 0
+
+    assert plugin._put_control_event("retry_now") is True
+    assert plugin._put_control_event("scan_now") is True
+    assert plugin._put_control_event("unknown") is False
+    plugin._events.put_nowait(("stop", ""))
+    plugin._worker_loop()
+
+    assert calls == [("retry", True), ("rapid", True)]
+    form, defaults = plugin.get_form()
+    assert "立即运行秒传一次" in str(form)
+    assert "立即重试秒传一次" in str(form)
+    assert defaults["run_rapid_once"] is False
+    assert defaults["run_retry_once"] is False
+
+
 def test_realtime_failure_then_retry_success_keeps_pt_file(tmp_path: Path):
     _install_stubs()
     plugin_root = Path(__file__).parents[1] / "plugins.v2"
@@ -554,3 +585,4 @@ def test_cached_legacy_asynctools_is_reloaded_after_install():
     )
     assert result is modern
     assert calls == [legacy]
+
