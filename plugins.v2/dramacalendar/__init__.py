@@ -42,37 +42,77 @@ def _episode_ranges(numbers: List[int]) -> str:
     return ",".join(ranges)
 
 
-def format_calendar(now: datetime, updates: List[EpisodeUpdate], calendar_days: int) -> str:
+def format_calendar(
+    now: datetime,
+    updates: List[EpisodeUpdate],
+    calendar_days: int,
+    notification_scope: str = "all",
+) -> str:
     """将未来排期整理为适合 MoviePilot 通知渠道的纯文本日历。"""
-    grouped: Dict[date, Dict[Tuple[str, int, bool], List[EpisodeUpdate]]] = defaultdict(
+    if notification_scope not in {"all", "in_library", "missing"}:
+        raise ValueError("NOTIFICATION_SCOPE_INVALID")
+    period_end = now.date() + timedelta(days=calendar_days - 1)
+    filtered = [
+        item for item in updates
+        if now.date() <= item.air_date <= period_end
+        and (
+        notification_scope == "all"
+        or (notification_scope == "in_library" and item.in_library)
+        or (notification_scope == "missing" and not item.in_library)
+        )
+    ]
+    grouped: Dict[date, Dict[Tuple[bool, str, int], List[EpisodeUpdate]]] = defaultdict(
         lambda: defaultdict(list)
     )
-    for update in updates:
+    for update in filtered:
         grouped[update.air_date][
-            (update.series_name, update.season, update.in_library)
+            (update.in_library, update.series_name, update.season)
         ].append(update)
 
-    title = "今日剧集更新" if calendar_days == 1 else f"未来{calendar_days}天剧集更新"
-    lines = [f"📺 {title}", ""]
+    if calendar_days == 1:
+        lines = [f"📺 今日剧集更新｜{now.strftime('%m月%d日')} 周{WEEKDAYS[now.weekday()]}", ""]
+    else:
+        lines = [f"📺 未来{calendar_days}天剧集更新", ""]
     for air_date in sorted(grouped):
-        delta = (air_date - now.date()).days
-        prefix = "今天" if delta == 0 else "明天" if delta == 1 else air_date.strftime("%m月%d日")
-        lines.append(f"【{prefix} 周{WEEKDAYS[air_date.weekday()]}】")
+        if calendar_days > 1:
+            delta = (air_date - now.date()).days
+            suffix = "今天" if delta == 0 else "明天" if delta == 1 else ""
+            date_title = f"{air_date.strftime('%m月%d日')} 周{WEEKDAYS[air_date.weekday()]}"
+            lines.append(f"【{date_title}{f' · {suffix}' if suffix else ''}】")
+            lines.append("")
         entries = grouped[air_date]
-        for (name, season, in_library), batch in sorted(
-            entries.items(), key=lambda item: (not item[0][2], item[0][0], item[0][1])
-        ):
-            marker = "🟢" if in_library else "🔴"
-            lines.append(
-                f"{marker} {name} S{season:02}E{_episode_ranges([item.episode for item in batch])}"
-            )
-        lines.append("")
+        for in_library, heading in ((False, "🔴 待入库"), (True, "🟢 已入库")):
+            batches = [
+                (name, season, batch)
+                for (state, name, season), batch in entries.items()
+                if state is in_library
+            ]
+            if not batches:
+                continue
+            lines.append(heading)
+            for name, season, batch in sorted(batches, key=lambda item: (item[0], item[1])):
+                lines.append(
+                    f"{name} S{season:02}E{_episode_ranges([item.episode for item in batch])}"
+                )
+            lines.append("")
     if not grouped:
-        lines.append(f"未来{calendar_days}天暂无剧集更新")
+        period = "今日" if calendar_days == 1 else f"未来{calendar_days}天"
+        lines.append(f"{period}没有符合通知范围的剧集更新")
         lines.append("")
-    series_count = len({item.series_name for item in updates})
-    lines.append(f"共 {series_count} 部剧集有更新")
-    lines.append("🟢 已入库 · 🔴 未入库")
+    series_count = len({item.series_name for item in filtered})
+    episode_count = len({
+        (item.air_date, item.series_name, item.season, item.episode) for item in filtered
+    })
+    missing_count = len({
+        (item.air_date, item.series_name, item.season, item.episode)
+        for item in filtered if not item.in_library
+    })
+    in_library_count = episode_count - missing_count
+    lines.append(f"共 {series_count} 部 · {episode_count} 集")
+    if notification_scope in {"all", "missing"}:
+        lines.append(f"待入库 {missing_count}集")
+    if notification_scope == "in_library":
+        lines.append(f"已入库 {in_library_count}集")
     return "\n".join(lines)
 
 
@@ -80,7 +120,7 @@ class DramaCalendar(_PluginBase):
     plugin_name = "追剧更新日历"
     plugin_desc = "读取Emby/Jellyfin剧集与TMDB排期，定时向MoviePilot管理员发送更新日历，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/drama-calendar.svg"
-    plugin_version = "0.1.0"
+    plugin_version = "0.1.1"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "dramacalendar_"
@@ -89,6 +129,7 @@ class DramaCalendar(_PluginBase):
 
     _enabled = False
     _notify_enabled = True
+    _notification_scope = "all"
     _use_mp_config = True
     _cron = "0 9 * * *"
     _timezone = ZoneInfo("Asia/Shanghai")
@@ -112,6 +153,11 @@ class DramaCalendar(_PluginBase):
         config = dict(config or {})
         self._enabled = bool(config.get("enabled", False))
         self._notify_enabled = bool(config.get("notify_enabled", True))
+        self._notification_scope = str(config.get("notification_scope", "all")).strip()
+        if self._notification_scope not in {"all", "in_library", "missing"}:
+            self._enabled = False
+            logger.error("追剧更新日历：初始化失败 [NOTIFICATION_SCOPE_INVALID]")
+            return
         self._use_mp_config = bool(config.get("use_mp_config", True))
         self._verify_https = bool(config.get("verify_https", True))
         self._stop_event = threading.Event()
@@ -354,7 +400,9 @@ class DramaCalendar(_PluginBase):
                 )
                 for item in updates
             ]
-            message = format_calendar(now, checked, self._calendar_days)
+            message = format_calendar(
+                now, checked, self._calendar_days, self._notification_scope
+            )
             notification_state = "已关闭"
             if self._notify_enabled:
                 try:
@@ -454,6 +502,20 @@ class DramaCalendar(_PluginBase):
                 "component": "VSwitch", "props": {"model": "use_mp_config", "label": "读取MoviePilot媒体服务器"}
             }]},
         ]})
+        content.append({"component": "VRow", "content": [{
+            "component": "VCol", "props": {"cols": 12}, "content": [{
+                "component": "VSelect", "props": {
+                    "model": "notification_scope",
+                    "label": "通知范围",
+                    "items": [
+                        {"title": "全都通知", "value": "all"},
+                        {"title": "仅通知已入库", "value": "in_library"},
+                        {"title": "仅通知未入库", "value": "missing"},
+                    ],
+                    "clearable": False,
+                }
+            }]
+        }]})
         content.append({"component": "VRow", "props": {"show": "{{use_mp_config}}"}, "content": [{
             "component": "VCol", "props": {"cols": 12}, "content": [{
                 "component": "VSelect", "props": {
@@ -497,6 +559,7 @@ class DramaCalendar(_PluginBase):
             "enabled": False,
             "run_once": False,
             "notify_enabled": True,
+            "notification_scope": "all",
             "use_mp_config": True,
             "media_server": "",
             "emby_url": "",
