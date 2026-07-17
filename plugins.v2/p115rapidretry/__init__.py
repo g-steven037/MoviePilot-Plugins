@@ -426,53 +426,7 @@ class P115RapidRetry(_PluginBase):
     def _safe_directory_stat(path: Path) -> os.stat_result:
         value = path.lstat()
         attributes = getattr(value, "st_file_attributes", 0)
-        reparse_marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-        if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode) or bool(attributes & reparse_marker):
-            raise ValueError("DIRECTORY_LINK_UNSAFE")
-        return value
-
-    @staticmethod
-    def _safe_code(exc: Exception) -> str:
-        text = str(exc)
-        if text and text.isupper() and " " not in text and len(text) <= 64:
-            return text
-        return type(exc).__name__.upper()[:64]
-
-    def get_state(self) -> bool:
-        return self._enabled
-
-    def get_service(self) -> Optional[List[Dict[str, Any]]]:
-        if not self._enabled:
-            return None
-        services = [{
-            "id": "P115RapidRetry_retry",
-            "name": "115秒传临时目录限速重试",
-            "trigger": CronTrigger.from_crontab(self._cron),
-            "func": self.retry_pending,
-            "kwargs": {},
-        }]
-        if self._empty_cleanup_enabled:
-            services.append({
-    …3808 tokens truncated…ntity(path, identity, self._watch_dir):
-                self._record(task_id, False, "FILE_CHANGED")
-                return
-            os.replace(path, destination)
-            if not same_identity(destination, identity, self._retry_dir):
-                if not path.exists():
-                    os.replace(destination, path)
-                self._record(task_id, False, "FILE_CHANGED")
-                return
-            self._initialize_retry(self._task_id(destination, self._retry_dir), "RAPID_MISS")
-            if self._detailed_logs:
-                logger.info(f"#115秒传# 文件已移动到临时目录: {self._safe_log_value(destination)}")
-                logger.info(f"#115秒传# [后台线程-{threading.current_thread().name}] 文件处理完成(移至临时目录): {self._safe_log_value(destination.name)}")
-            else:
-                logger.info(
-                    f"#115秒传# [简短] 已转移临时文件夹 | 文件={self._safe_log_value(destination.name)} | "
-                    f"临时目录={self._safe_log_value(destination.parent)}"
-                )
-        except (OSError, ValueError):
-            self._record(task_id, False, "MOVE_FAILED")
+        reparse_marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE…4517 tokens truncated…D")
             logger.warning(f"#115秒传# 移动到临时目录失败: {self._safe_log_value(path.name)}")
 
     @staticmethod
@@ -853,4 +807,3 @@ class P115RapidRetry(_PluginBase):
             self._worker.join(timeout=10)
         self._worker = None
         self._client = None
-
