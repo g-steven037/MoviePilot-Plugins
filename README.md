@@ -180,6 +180,10 @@ https://github.com/g-steven037/MoviePilot-Plugins
 - `FILE_CHANGED`：处理期间文件身份发生变化，停止删除或移动。
 - `RETRY_EXHAUSTED`：达到配置的最大重试次数，停止自动重试。
 
+## MoviePilot更新后的依赖稳定性
+
+插件固定使用支持Python 3.12的 `python-asynctools 0.2.2`、`p115client 0.0.9.4.1` 和 `watchdog 6.0.0`。`python-asynctools 0.2.1` 会直接导入Python 3.12不再公开的 `collections.abc._check_methods`，因此禁止继续使用。插件启动时同时校验实际导入版本和p115client需要的公共函数；MoviePilot更新重建虚拟环境后会按插件依赖清单重新安装固定版本，进程中若残留旧模块缓存也会在导入p115client前重载。
+
 ---
 
 # Emby 媒体库封面（仅自用）

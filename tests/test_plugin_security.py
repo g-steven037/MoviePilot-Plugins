@@ -61,6 +61,7 @@ def _install_stubs():
     p115 = types.ModuleType("p115client")
     p115.P115Client = object
     asynctools = types.ModuleType("asynctools")
+    asynctools.__version__ = (0, 2, 2)
     asynctools.ensure_async = lambda function, **_kwargs: function
     asynctools.async_collect = object()
     asynctools.async_chain_from_iterable = object()
@@ -563,7 +564,7 @@ def test_dependency_manifest_uses_correct_asynctools_distribution():
         Path(__file__).parents[1] / "plugins.v2" / "p115rapidretry" / "requirements.txt"
     ).read_text(encoding="utf-8").splitlines()
     assert requirements[:2] == [
-        "python-asynctools==0.2.1",
+        "python-asynctools==0.2.2",
         "p115client==0.0.9.4.1",
     ]
     assert not any(line.partition("==")[0].strip() == "asynctools" for line in requirements)
@@ -579,7 +580,9 @@ def test_cached_legacy_asynctools_is_reloaded_after_install():
     spec.loader.exec_module(dependency)
 
     legacy = types.ModuleType("asynctools")
+    legacy.__version__ = (0, 2, 1)
     modern = types.ModuleType("asynctools")
+    modern.__version__ = (0, 2, 2)
     for name in dependency.REQUIRED_ASYNCTOOLS_EXPORTS:
         setattr(modern, name, object())
     calls = []
@@ -589,3 +592,26 @@ def test_cached_legacy_asynctools_is_reloaded_after_install():
     )
     assert result is modern
     assert calls == [legacy]
+
+
+def test_asynctools_021_is_rejected_even_when_exports_exist():
+    import importlib.util
+
+    path = Path(__file__).parents[1] / "plugins.v2" / "p115rapidretry" / "dependency.py"
+    spec = importlib.util.spec_from_file_location("p115_dependency_version_test", path)
+    dependency = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(dependency)
+
+    broken = types.ModuleType("asynctools")
+    broken.__version__ = (0, 2, 1)
+    for name in dependency.REQUIRED_ASYNCTOOLS_EXPORTS:
+        setattr(broken, name, object())
+    try:
+        dependency.ensure_asynctools_compatible(
+            broken, reload_module=lambda module: module
+        )
+    except ImportError as exc:
+        assert str(exc) == "python-asynctools>=0.2.2 is required"
+    else:
+        raise AssertionError("incompatible python-asynctools 0.2.1 was accepted")
