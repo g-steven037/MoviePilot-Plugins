@@ -45,6 +45,7 @@ def main() -> int:
     plugin.test_retry_exhaustion_delete_switch_is_safe_and_keeps_pt_file(temporary_path())
     plugin.test_verified_unlink_rejects_replaced_file(temporary_path())
     plugin.test_dependency_manifest_uses_correct_asynctools_distribution()
+    plugin.test_p115_sources_are_strict_utf8_without_replacement_characters()
     plugin.test_cached_legacy_asynctools_is_reloaded_after_install()
     plugin.test_asynctools_021_is_rejected_even_when_exports_exist()
     emby.test_url_and_api_key_are_hardened()
@@ -70,7 +71,7 @@ def main() -> int:
     actor_chinese.test_form_defaults_to_preview_and_hides_manual_credentials()
     actor_chinese.test_emby_client_never_puts_key_in_url_and_blocks_redirect()
     actor_chinese.test_preview_never_writes_and_sync_verifies_write()
-    print("All 46 unit, security, rendering, realtime, capacity-control, calendar, and actor tests passed.")
+    print("All 47 unit, security, rendering, realtime, capacity-control, calendar, and actor tests passed.")
     return 0
 
 

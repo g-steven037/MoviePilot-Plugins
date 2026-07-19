@@ -570,6 +570,14 @@ def test_dependency_manifest_uses_correct_asynctools_distribution():
     assert not any(line.partition("==")[0].strip() == "asynctools" for line in requirements)
 
 
+def test_p115_sources_are_strict_utf8_without_replacement_characters():
+    plugin_dir = Path(__file__).parents[1] / "plugins.v2" / "p115rapidretry"
+    for path in plugin_dir.glob("*.py"):
+        source = path.read_bytes().decode("utf-8", errors="strict")
+        assert "\ufffd" not in source, f"replacement character found in {path.name}"
+        compile(source, str(path), "exec")
+
+
 def test_cached_legacy_asynctools_is_reloaded_after_install():
     import importlib.util
 
