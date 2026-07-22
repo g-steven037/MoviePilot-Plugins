@@ -15,7 +15,7 @@ https://github.com/g-steven037/MoviePilot-Plugins
 - `DownloadCapacityGuard`：监控VPS本地磁盘容量，在MoviePilot提交下载任务前判断空间并拒绝容量不足的任务。
 - `DramaCalendar`：读取Emby/Jellyfin剧集与TMDB排期，通过MoviePilot定时发送未来剧集更新日历。
 - `EmbyActorChinese`：按影视名称和年份读取豆瓣演职员表，将演员角色名中文化，严格预览后可同步到Emby。
-- `SubscribeAssistant`：复用官方实时硬链接监控，只读应用现有订阅的自定义识别词重命名目标文件，未命中时保持原名。
+- `SubscribeLinkRenamer`：复用官方实时硬链接监控，只读应用现有订阅的自定义识别词重命名目标文件，未命中时保持原名。
 
 ---
 
@@ -235,11 +235,11 @@ https://github.com/g-steven037/MoviePilot-Plugins
 
 ---
 
-# 订阅助手（仅自用）
+# 订阅助手（识别词硬链接，仅自用）
 
 插件核心目录监控直接采用官方插件市场“实时硬链接”的 `watchfiles` 实现，支持性能模式、兼容轮询模式、立即全量运行、Cron全量同步、排除关键词、通知，以及小于阈值文件改用复制。插件不再创建规则，不会新增、修改或删除任何订阅。
 
-v0.2.1 已取消不必要的站点认证等级限制，插件市场对MoviePilot管理员正常显示。
+v0.3.0 使用唯一插件 ID `SubscribeLinkRenamer`，避免与市场中已有的 `SubscribeAssistant` 冲突；v0.2.1 已取消不必要的站点认证等级限制。
 
 处理文件时，插件只读查询 MoviePilot 当前订阅的 `custom_words`，逐个调用 MoviePilot 原生 `WordsMatcher.prepare()`：
 

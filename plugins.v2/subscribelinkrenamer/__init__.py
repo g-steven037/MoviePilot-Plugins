@@ -116,7 +116,7 @@ class WatchfilesObserver:
 
 
 class FileMonitorHandler:
-    def __init__(self, monpath: str, plugin: "SubscribeAssistant"):
+    def __init__(self, monpath: str, plugin: "SubscribeLinkRenamer"):
         self._watch_path = monpath
         self._plugin = plugin
 
@@ -138,14 +138,14 @@ class FileMonitorHandler:
         )
 
 
-class SubscribeAssistant(_PluginBase):
-    plugin_name = "订阅助手"
+class SubscribeLinkRenamer(_PluginBase):
+    plugin_name = "订阅助手（识别词硬链接）"
     plugin_desc = "基于实时硬链接，将订阅自定义识别词应用到目标文件名；未命中时保持原名。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/subscribe-assistant.svg"
-    plugin_version = "0.2.1"
+    plugin_version = "0.3.0"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
-    plugin_config_prefix = "subscribeassistant_"
+    plugin_config_prefix = "subscribelinkrenamer_"
     plugin_order = 35
     # 该插件只使用本地文件和现有订阅，不应要求站点认证，否则会被市场直接隐藏。
     auth_level = 1
@@ -443,7 +443,7 @@ class SubscribeAssistant(_PluginBase):
     def get_service(self) -> List[Dict[str, Any]]:
         if self._enabled and self._cron:
             return [{
-                "id": "SubscribeAssistantLinkMonitor",
+                "id": "SubscribeLinkRenamerMonitor",
                 "name": "订阅识别词全量硬链接",
                 "trigger": CronTrigger.from_crontab(self._cron),
                 "func": self.sync_all,

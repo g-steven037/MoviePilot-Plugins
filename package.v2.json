@@ -103,17 +103,18 @@
       "v0.1.0": "单片测试版：按名称、年份和类型严格匹配Emby与豆瓣条目，按豆瓣latin_name唯一匹配英文演员名，支持仅预览、确认同步、写入后验证、失败自动回滚和脱敏历史"
     }
   },
-  "SubscribeAssistant": {
-    "name": "订阅助手",
+  "SubscribeLinkRenamer": {
+    "name": "订阅助手（识别词硬链接）",
     "description": "基于实时硬链接，只读使用现有订阅中的自定义识别词重命名目标文件；未命中时保持原名，仅自用测试。",
     "labels": "订阅,识别词,实时监控,硬链接,重命名",
-    "version": "0.2.1",
+    "version": "0.3.0",
     "icon": "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/subscribe-assistant.svg",
     "author": "g-steven037",
     "level": 1,
     "v2": true,
     "system_version": ">=2.14.4,<3",
     "history": {
+      "v0.3.0": "修复与现有市场插件SubscribeAssistant发生ID冲突而被高版本覆盖：使用唯一插件ID SubscribeLinkRenamer，并同步迁移类名和插件目录",
       "v0.2.1": "修复插件市场不可见：移除不必要的站点认证限制，将市场与运行权限调整为所有MoviePilot管理员可见",
       "v0.2.0": "删除规则创建、订阅自动修改和自定义规则面板；核心目录监控改为复用官方实时硬链接的watchfiles快速/兼容模式、全量同步、排除关键词及小文件复制逻辑；只读汇总现有订阅custom_words并使用MoviePilot原生WordsMatcher转换目标文件名，未命中或歧义时保持原名",
       "v0.1.0": "首次发布：以结构化行配置PT名称/季与订阅名称/季映射，新增订阅后自动写入搜索关键词、包含规则和自定义识别词；实时监控下载目录，结合下载器状态及文件稳定性确认完成后按同一规则改名硬链接，源文件只读、冲突不覆盖、变化自动撤销并重新等待"

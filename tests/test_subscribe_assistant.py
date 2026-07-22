@@ -131,12 +131,12 @@ sys.modules["watchfiles"] = watchfiles
 PLUGIN_ROOT = Path(__file__).parents[1] / "plugins.v2"
 sys.path.insert(0, str(PLUGIN_ROOT))
 
-from subscribeassistant import SubscribeAssistant, _is_download_tmp_file
+from subscribelinkrenamer import SubscribeLinkRenamer, _is_download_tmp_file
 
 
 def test_plugin_is_visible_without_site_authentication():
-    assert SubscribeAssistant.plugin_version == "0.2.1"
-    assert SubscribeAssistant.auth_level == 1
+    assert SubscribeLinkRenamer.plugin_version == "0.3.0"
+    assert SubscribeLinkRenamer.auth_level == 1
 
 
 def _subscription(sid, words):
@@ -144,7 +144,7 @@ def _subscription(sid, words):
 
 
 def test_subscription_words_rename_unique_match_and_keep_original_without_match():
-    plugin = SubscribeAssistant()
+    plugin = SubscribeLinkRenamer()
     _SubscribeOper.records = [
         _subscription(7, r"Game[ .]+of[ .]+Flame[ .]+S01 => 食神·百厨大战 S02"),
         _subscription(8, r"Soul[ .]+Land[ .]+S02 => 斗罗大陆Ⅱ绝世唐门 S01"),
@@ -159,7 +159,7 @@ def test_subscription_words_rename_unique_match_and_keep_original_without_match(
 
 
 def test_ambiguous_subscription_words_keep_original_name():
-    plugin = SubscribeAssistant()
+    plugin = SubscribeLinkRenamer()
     _SubscribeOper.records = [
         _subscription(1, r"Show => 第一名称"),
         _subscription(2, r"Show => 第二名称"),
@@ -171,7 +171,7 @@ def test_ambiguous_subscription_words_keep_original_name():
 
 
 def test_subscription_events_only_invalidate_cache_and_never_write_database():
-    plugin = SubscribeAssistant()
+    plugin = SubscribeLinkRenamer()
     plugin._enabled = True
     plugin._subscription_words = [(1, ["A => B"])]
     plugin.invalidate_subscription_words(types.SimpleNamespace(event_data={"subscribe_id": 1}))
@@ -186,7 +186,7 @@ def test_link_file_uses_subscription_rename_and_preserves_source(tmp_path: Path)
     target_root.mkdir()
     source = source_root / "Game.of.Flame.S01E04.mkv"
     source.write_bytes(b"video")
-    plugin = SubscribeAssistant()
+    plugin = SubscribeLinkRenamer()
     _SubscribeOper.records = [_subscription(7, r"Game[ .]+of[ .]+Flame[ .]+S01 => 食神·百厨大战 S02")]
     plugin._subscription_words = None
     state, _, destination, rename_status, sid = plugin._link_file(
@@ -206,7 +206,7 @@ def test_link_file_without_custom_words_uses_original_relative_path(tmp_path: Pa
     target_root.mkdir()
     source = nested / "Unknown.S01E01.mkv"
     source.write_bytes(b"video")
-    plugin = SubscribeAssistant()
+    plugin = SubscribeLinkRenamer()
     _SubscribeOper.records = []
     plugin._subscription_words = None
     state, _, destination, rename_status, sid = plugin._link_file(
