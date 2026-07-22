@@ -134,6 +134,11 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 from subscribeassistant import SubscribeAssistant, _is_download_tmp_file
 
 
+def test_plugin_is_visible_without_site_authentication():
+    assert SubscribeAssistant.plugin_version == "0.2.1"
+    assert SubscribeAssistant.auth_level == 1
+
+
 def _subscription(sid, words):
     return types.SimpleNamespace(id=sid, custom_words=words)
 
@@ -215,4 +220,3 @@ def test_download_temp_extensions_are_skipped():
     assert _is_download_tmp_file(Path("episode.mkv.!qB"))
     assert _is_download_tmp_file(Path("episode.part"))
     assert not _is_download_tmp_file(Path("episode.mkv"))
-

@@ -142,12 +142,13 @@ class SubscribeAssistant(_PluginBase):
     plugin_name = "订阅助手"
     plugin_desc = "基于实时硬链接，将订阅自定义识别词应用到目标文件名；未命中时保持原名。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/subscribe-assistant.svg"
-    plugin_version = "0.2.0"
+    plugin_version = "0.2.1"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "subscribeassistant_"
     plugin_order = 35
-    auth_level = 2
+    # 该插件只使用本地文件和现有订阅，不应要求站点认证，否则会被市场直接隐藏。
+    auth_level = 1
 
     _scheduler: Optional[BackgroundScheduler] = None
     _observers: List[WatchfilesObserver] = []

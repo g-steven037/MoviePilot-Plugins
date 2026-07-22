@@ -239,6 +239,8 @@ https://github.com/g-steven037/MoviePilot-Plugins
 
 插件核心目录监控直接采用官方插件市场“实时硬链接”的 `watchfiles` 实现，支持性能模式、兼容轮询模式、立即全量运行、Cron全量同步、排除关键词、通知，以及小于阈值文件改用复制。插件不再创建规则，不会新增、修改或删除任何订阅。
 
+v0.2.1 已取消不必要的站点认证等级限制，插件市场对MoviePilot管理员正常显示。
+
 处理文件时，插件只读查询 MoviePilot 当前订阅的 `custom_words`，逐个调用 MoviePilot 原生 `WordsMatcher.prepare()`：
 
 - 只有一个订阅识别词产生新名称时，目标文件使用转换后的名称。
