@@ -14,6 +14,7 @@ import test_emby_library_cover as emby
 import test_download_capacity_guard as capacity
 import test_drama_calendar as calendar
 import test_emby_actor_chinese as actor_chinese
+import test_subscribe_assistant as subscribe_assistant
 
 
 def temporary_path() -> Path:
@@ -71,7 +72,13 @@ def main() -> int:
     actor_chinese.test_form_defaults_to_preview_and_hides_manual_credentials()
     actor_chinese.test_emby_client_never_puts_key_in_url_and_blocks_redirect()
     actor_chinese.test_preview_never_writes_and_sync_verifies_write()
-    print("All 47 unit, security, rendering, realtime, capacity-control, calendar, and actor tests passed.")
+    subscribe_assistant.test_subscription_words_rename_unique_match_and_keep_original_without_match()
+    subscribe_assistant.test_ambiguous_subscription_words_keep_original_name()
+    subscribe_assistant.test_subscription_events_only_invalidate_cache_and_never_write_database()
+    subscribe_assistant.test_link_file_uses_subscription_rename_and_preserves_source(temporary_path())
+    subscribe_assistant.test_link_file_without_custom_words_uses_original_relative_path(temporary_path())
+    subscribe_assistant.test_download_temp_extensions_are_skipped()
+    print("All 53 unit, security, rendering, realtime, capacity-control, calendar, actor, and subscription-assistant tests passed.")
     return 0
 
 

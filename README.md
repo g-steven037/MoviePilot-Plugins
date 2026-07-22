@@ -15,6 +15,7 @@ https://github.com/g-steven037/MoviePilot-Plugins
 - `DownloadCapacityGuard`：监控VPS本地磁盘容量，在MoviePilot提交下载任务前判断空间并拒绝容量不足的任务。
 - `DramaCalendar`：读取Emby/Jellyfin剧集与TMDB排期，通过MoviePilot定时发送未来剧集更新日历。
 - `EmbyActorChinese`：按影视名称和年份读取豆瓣演职员表，将演员角色名中文化，严格预览后可同步到Emby。
+- `SubscribeAssistant`：复用官方实时硬链接监控，只读应用现有订阅的自定义识别词重命名目标文件，未命中时保持原名。
 
 ---
 
@@ -231,3 +232,38 @@ https://github.com/g-steven037/MoviePilot-Plugins
 ## 字体许可
 
 中文字体基于 Noto Fonts 官方 `NotoSansCJKsc-Bold.otf` 制作 GBK 字符子集并重命名为 `MoviePilotCJKsc-Bold.otf`，英文使用 `Melete-Bold.otf`，均按 SIL Open Font License 1.1 再分发。为兼容 MoviePilot v2.14.2 将二进制资源按UTF-8文本写入的安装器，两份字体以 gzip + Base64 文本保存，启动时在配置目录本地解码并校验 SHA-256；字体缺失、损坏或无法加载时插件会明确报错，不再静默回退生成方框。许可证位于 `fonts/OFL-NotoSansCJK.txt` 和 `fonts/OFL-Melete.txt`。
+
+---
+
+# 订阅助手（仅自用）
+
+插件核心目录监控直接采用官方插件市场“实时硬链接”的 `watchfiles` 实现，支持性能模式、兼容轮询模式、立即全量运行、Cron全量同步、排除关键词、通知，以及小于阈值文件改用复制。插件不再创建规则，不会新增、修改或删除任何订阅。
+
+处理文件时，插件只读查询 MoviePilot 当前订阅的 `custom_words`，逐个调用 MoviePilot 原生 `WordsMatcher.prepare()`：
+
+- 只有一个订阅识别词产生新名称时，目标文件使用转换后的名称。
+- 没有订阅识别词或没有命中时，目标文件保持原名。
+- 多个订阅产生相同新名称时，按该唯一名称处理。
+- 多个订阅产生不同新名称时，为避免误改名，保持原名并记录警告。
+- 识别词产生路径分隔符或其他不安全文件名时，保持原名。
+- 源 PT 文件只用于硬链接，不改名、不移动、不删除；相对目录结构保持不变。
+
+## 配置
+
+`监控目录`每行填写一组容器内绝对路径：
+
+```text
+/path/to/pt-downloads:/path/to/hardlinks
+```
+
+来源与目标必须互不包含并处于同一文件系统。性能模式优先使用系统原生文件通知，失败后自动回退兼容轮询；兼容模式适用于部分 SMB/NFS 挂载。MoviePilot 配置的下载临时扩展名（例如 `.!qB`、`.part`）不会处理。
+
+`最小硬链接大小（KB）`沿用官方逻辑：数值大于0时，小于阈值的文件使用复制，其余文件使用硬链接；留空或填写0表示全部硬链接。目标文件已存在时不会覆盖。
+
+订阅中的识别词格式完全遵循 MoviePilot 原生规则，包括替换词、屏蔽词、集数偏移和组合规则。例如订阅自定义识别词：
+
+```text
+(?i:\bGame[ ._-]+of[ ._-]+Flame[ ._-]+S01)(?=E\d{1,4}\b) => 食神·百厨大战 S02
+```
+
+目标文件 `Game.of.Flame.S01E04.2160p.mkv` 会命名为 `食神·百厨大战 S02E04.2160p.mkv`；源文件名保持不变。
