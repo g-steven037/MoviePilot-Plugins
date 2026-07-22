@@ -40,9 +40,22 @@ class _WordsMatcher:
 
 class _SubscribeOper:
     records = []
+    update_calls = []
 
     def list(self):
         return list(self.records)
+
+    def get(self, sid):
+        return next((record for record in self.records if record.id == sid), None)
+
+    def update(self, sid, payload):
+        record = self.get(sid)
+        if not record:
+            return None
+        self.update_calls.append((sid, dict(payload)))
+        for key, value in payload.items():
+            setattr(record, key, value)
+        return record
 
 
 class _SystemUtils:
@@ -132,15 +145,70 @@ PLUGIN_ROOT = Path(__file__).parents[1] / "plugins.v2"
 sys.path.insert(0, str(PLUGIN_ROOT))
 
 from subscribelinkrenamer import SubscribeLinkRenamer, _is_download_tmp_file
+from varietysubscribeassistant import VarietySubscribeAssistant
 
 
 def test_plugin_is_visible_without_site_authentication():
-    assert SubscribeLinkRenamer.plugin_version == "0.3.0"
+    assert SubscribeLinkRenamer.plugin_name == "识别词硬链接"
+    assert SubscribeLinkRenamer.plugin_version == "0.3.1"
     assert SubscribeLinkRenamer.auth_level == 1
+    assert VarietySubscribeAssistant.plugin_name == "订阅助手"
+    assert VarietySubscribeAssistant.plugin_version == "0.1.0"
+    assert VarietySubscribeAssistant.plugin_config_prefix == "varietysubscribeassistant_"
+    assert VarietySubscribeAssistant.auth_level == 1
 
 
-def _subscription(sid, words):
-    return types.SimpleNamespace(id=sid, custom_words=words)
+def _subscription(sid, words, **kwargs):
+    values = {
+        "id": sid,
+        "name": f"订阅{sid}",
+        "custom_words": words,
+        "media_category": "",
+        "include": "",
+        "filter_groups": [],
+    }
+    values.update(kwargs)
+    return types.SimpleNamespace(**values)
+
+
+def test_variety_subscription_gets_strict_main_feature_policy():
+    plugin = VarietySubscribeAssistant()
+    plugin.init_plugin({"enabled": True})
+    subscribe = _subscription(21, "", name="食神·百厨大战", media_category="综艺")
+    _SubscribeOper.records = [subscribe]
+    _SubscribeOper.update_calls = []
+
+    plugin.apply_variety_policy(types.SimpleNamespace(event_data={
+        "subscribe_id": 21,
+        "mediainfo": {"category": "综艺"},
+    }))
+
+    assert subscribe.include == "正片"
+    assert subscribe.filter_groups == ["日常观影"]
+    assert _SubscribeOper.update_calls == [(21, {
+        "include": "正片",
+        "filter_groups": ["日常观影"],
+    })]
+
+
+def test_variety_subscription_policy_does_not_touch_other_categories():
+    plugin = VarietySubscribeAssistant()
+    plugin.init_plugin({"enabled": True})
+    subscribe = _subscription(
+        22, "", name="普通剧集", media_category="电视剧",
+        include="保留规则", filter_groups=["原规则组"],
+    )
+    _SubscribeOper.records = [subscribe]
+    _SubscribeOper.update_calls = []
+
+    plugin.apply_variety_policy(types.SimpleNamespace(event_data={
+        "subscribe_id": 22,
+        "mediainfo": {"category": "电视剧"},
+    }))
+
+    assert subscribe.include == "保留规则"
+    assert subscribe.filter_groups == ["原规则组"]
+    assert _SubscribeOper.update_calls == []
 
 
 def test_subscription_words_rename_unique_match_and_keep_original_without_match():
@@ -174,9 +242,10 @@ def test_subscription_events_only_invalidate_cache_and_never_write_database():
     plugin = SubscribeLinkRenamer()
     plugin._enabled = True
     plugin._subscription_words = [(1, ["A => B"])]
+    _SubscribeOper.update_calls = []
     plugin.invalidate_subscription_words(types.SimpleNamespace(event_data={"subscribe_id": 1}))
     assert plugin._subscription_words is None
-    assert not hasattr(_SubscribeOper, "update")
+    assert _SubscribeOper.update_calls == []
 
 
 def test_link_file_uses_subscription_rename_and_preserves_source(tmp_path: Path):

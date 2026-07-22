@@ -89,14 +89,14 @@ class WatchfilesObserver:
             if self._stop_event.is_set():
                 return
             if self._force_polling is True:
-                logger.error(f"订阅助手：目录监控失败 [{type(exc).__name__.upper()}]")
+                logger.error(f"识别词硬链接：目录监控失败 [{type(exc).__name__.upper()}]")
                 return
-            logger.warning("#订阅助手# 性能模式不可用，自动切换兼容模式")
+            logger.warning("#识别词硬链接# 性能模式不可用，自动切换兼容模式")
             try:
                 self._run_watch(force_polling=True)
             except Exception as fallback_exc:
                 if not self._stop_event.is_set():
-                    logger.error(f"订阅助手：兼容模式监控失败 [{type(fallback_exc).__name__.upper()}]")
+                    logger.error(f"识别词硬链接：兼容模式监控失败 [{type(fallback_exc).__name__.upper()}]")
 
     def _run_watch(self, force_polling: Optional[bool]):
         for changes in watch(
@@ -139,10 +139,10 @@ class FileMonitorHandler:
 
 
 class SubscribeLinkRenamer(_PluginBase):
-    plugin_name = "订阅助手（识别词硬链接）"
+    plugin_name = "识别词硬链接"
     plugin_desc = "基于实时硬链接，将订阅自定义识别词应用到目标文件名；未命中时保持原名。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/subscribe-assistant.svg"
-    plugin_version = "0.3.0"
+    plugin_version = "0.3.1"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "subscribelinkrenamer_"
@@ -179,7 +179,7 @@ class SubscribeLinkRenamer(_PluginBase):
         except ValueError as exc:
             self._enabled = False
             self._onlyonce = False
-            logger.error(f"订阅助手：最小文件大小配置无效 [{str(exc)}]")
+            logger.error(f"识别词硬链接：最小文件大小配置无效 [{str(exc)}]")
             return
         self._dirconf = {}
         self._subscription_words = None
@@ -195,7 +195,7 @@ class SubscribeLinkRenamer(_PluginBase):
                 source, target = self._parse_directory_line(line)
                 self._dirconf[str(source)] = target
             except ValueError as exc:
-                logger.error(f"订阅助手：监控目录配置无效 [{str(exc)}]")
+                logger.error(f"识别词硬链接：监控目录配置无效 [{str(exc)}]")
 
         if self._enabled:
             for source_text, target in self._dirconf.items():
@@ -208,11 +208,11 @@ class SubscribeLinkRenamer(_PluginBase):
                     observer.start()
                     self._observers.append(observer)
                     logger.info(
-                        f"#订阅助手# 实时硬链接监控已启动 | 来源={source_text} | 目标={target} | "
+                        f"#识别词硬链接# 实时硬链接监控已启动 | 来源={source_text} | 目标={target} | "
                         f"模式={self._mode}"
                     )
                 except Exception as exc:
-                    logger.error(f"订阅助手：目录监控启动失败 [{type(exc).__name__.upper()}]")
+                    logger.error(f"识别词硬链接：目录监控启动失败 [{type(exc).__name__.upper()}]")
 
         if self._onlyonce:
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
@@ -297,7 +297,7 @@ class SubscribeLinkRenamer(_PluginBase):
                 if current:
                     words.append((int(getattr(subscribe, "id", 0) or 0), current))
         except Exception as exc:
-            logger.warning(f"#订阅助手# 读取订阅自定义识别词失败 [{type(exc).__name__.upper()}]")
+            logger.warning(f"#识别词硬链接# 读取订阅自定义识别词失败 [{type(exc).__name__.upper()}]")
             words = []
         self._subscription_words = words
         return words
@@ -318,12 +318,12 @@ class SubscribeLinkRenamer(_PluginBase):
         return renamed, subscribe_id, "CUSTOM_WORD_APPLIED"
 
     def sync_all(self):
-        logger.info("#订阅助手# 开始全量实时硬链接")
+        logger.info("#识别词硬链接# 开始全量实时硬链接")
         self._subscription_words = None
         for source_text in list(self._dirconf):
             for file_path in SystemUtils.list_files(Path(source_text), [".*"]):
                 self._handle_file(event_path=str(file_path), mon_path=source_text)
-        logger.info("#订阅助手# 全量实时硬链接完成")
+        logger.info("#识别词硬链接# 全量实时硬链接完成")
 
     def event_handler(self, event: WatchfilesEvent, mon_path: str, text: str, event_path: str):
         if not event.is_directory:
@@ -363,7 +363,7 @@ class SubscribeLinkRenamer(_PluginBase):
                     return
                 for keyword in self._exclude_keywords.splitlines():
                     if keyword and re.search(keyword, event_path):
-                        logger.info(f"#订阅助手# 文件命中排除关键词，跳过 | 文件={file_path.name}")
+                        logger.info(f"#识别词硬链接# 文件命中排除关键词，跳过 | 文件={file_path.name}")
                         return
                 transfer_type = "copy" if self._size > 0 and file_path.stat().st_size < self._size * 1024 else "link"
                 target = self._dirconf.get(mon_path)
@@ -377,7 +377,7 @@ class SubscribeLinkRenamer(_PluginBase):
                 )
                 if not state:
                     logger.warning(
-                        f"#订阅助手# {'复制' if transfer_type == 'copy' else '硬链接'}失败 | "
+                        f"#识别词硬链接# {'复制' if transfer_type == 'copy' else '硬链接'}失败 | "
                         f"文件={file_path.name} | 代码={message or 'TRANSFER_FAILED'}"
                     )
                     if self._notify:
@@ -388,11 +388,11 @@ class SubscribeLinkRenamer(_PluginBase):
                         )
                     return
                 if rename_status == "AMBIGUOUS_CUSTOM_WORDS":
-                    logger.warning(f"#订阅助手# 多个订阅识别词产生不同文件名，已保持原名 | 文件={file_path.name}")
+                    logger.warning(f"#识别词硬链接# 多个订阅识别词产生不同文件名，已保持原名 | 文件={file_path.name}")
                 elif rename_status == "UNSAFE_RENAMED_FILENAME":
-                    logger.warning(f"#订阅助手# 识别词产生不安全文件名，已保持原名 | 文件={file_path.name}")
+                    logger.warning(f"#识别词硬链接# 识别词产生不安全文件名，已保持原名 | 文件={file_path.name}")
                 logger.info(
-                    f"#订阅助手# {'复制' if transfer_type == 'copy' else '硬链接'}成功 | "
+                    f"#识别词硬链接# {'复制' if transfer_type == 'copy' else '硬链接'}成功 | "
                     f"源文件={file_path.name} | 目标文件={destination.name} | "
                     f"识别词={'订阅ID ' + str(subscribe_id) if subscribe_id else '未命中，保持原名'}"
                 )
@@ -403,7 +403,7 @@ class SubscribeLinkRenamer(_PluginBase):
                         text=f"目标目录：{destination.parent}",
                     )
         except Exception as exc:
-            logger.error(f"订阅助手：目录监控处理失败 [{type(exc).__name__.upper()}]")
+            logger.error(f"识别词硬链接：目录监控处理失败 [{type(exc).__name__.upper()}]")
 
     @eventmanager.register(EventType.PluginAction)
     def remote_sync(self, event: Event):

@@ -72,13 +72,16 @@ def main() -> int:
     actor_chinese.test_form_defaults_to_preview_and_hides_manual_credentials()
     actor_chinese.test_emby_client_never_puts_key_in_url_and_blocks_redirect()
     actor_chinese.test_preview_never_writes_and_sync_verifies_write()
+    subscribe_assistant.test_plugin_is_visible_without_site_authentication()
+    subscribe_assistant.test_variety_subscription_gets_strict_main_feature_policy()
+    subscribe_assistant.test_variety_subscription_policy_does_not_touch_other_categories()
     subscribe_assistant.test_subscription_words_rename_unique_match_and_keep_original_without_match()
     subscribe_assistant.test_ambiguous_subscription_words_keep_original_name()
     subscribe_assistant.test_subscription_events_only_invalidate_cache_and_never_write_database()
     subscribe_assistant.test_link_file_uses_subscription_rename_and_preserves_source(temporary_path())
     subscribe_assistant.test_link_file_without_custom_words_uses_original_relative_path(temporary_path())
     subscribe_assistant.test_download_temp_extensions_are_skipped()
-    print("All 53 unit, security, rendering, realtime, capacity-control, calendar, actor, and subscription-assistant tests passed.")
+    print("All 56 unit, security, rendering, realtime, capacity-control, calendar, actor, and subscription-assistant tests passed.")
     return 0
 
 
