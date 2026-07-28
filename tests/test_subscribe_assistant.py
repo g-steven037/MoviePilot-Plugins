@@ -156,7 +156,11 @@ for module_name in list(sys.modules):
         sys.modules.pop(module_name, None)
 
 from subscribelinkrenamer import SubscribeLinkRenamer, _is_download_tmp_file
-from varietysubscribeassistant import VarietySubscribeAssistant, format_subscription_summary
+from varietysubscribeassistant import (
+    VarietySubscribeAssistant,
+    format_subscription_summary,
+    normalize_summary_scopes,
+)
 
 
 def test_plugin_is_visible_without_site_authentication():
@@ -164,7 +168,7 @@ def test_plugin_is_visible_without_site_authentication():
     assert SubscribeLinkRenamer.plugin_version == "0.3.1"
     assert SubscribeLinkRenamer.auth_level == 1
     assert VarietySubscribeAssistant.plugin_name == "订阅助手"
-    assert VarietySubscribeAssistant.plugin_version == "0.2.1"
+    assert VarietySubscribeAssistant.plugin_version == "0.3.0"
     assert VarietySubscribeAssistant.plugin_config_prefix == "varietysubscribeassistant_"
     assert VarietySubscribeAssistant.auth_level == 1
 
@@ -195,8 +199,12 @@ def _subscription(sid, words, **kwargs):
         "season": 1,
         "total_episode": 0,
         "lack_episode": 0,
+        "start_episode": 1,
+        "note": [],
+        "episode_priority": {},
         "year": "",
         "date": "",
+        "last_update": "",
     }
     values.update(kwargs)
     return types.SimpleNamespace(**values)
@@ -297,29 +305,45 @@ def test_include_can_be_explicitly_cleared_for_non_variety_policy():
 def test_subscription_summary_formats_active_and_today_completed():
     active = [
         _subscription(
-            31, "", name="脱口秀和Ta的朋友们", season=3,
-            total_episode=12, lack_episode=2, state="R",
+            31, "", name="依然的喜事", year="2026", season=1,
+            total_episode=20, lack_episode=0, note=[19, 20],
+            last_update="2026-07-28 08:30:00",
         ),
-        _subscription(32, "", name="测试电影", type="电影", year="2026", state="N"),
+        _subscription(
+            32, "", name="一斩苍穹", year="2026", season=1,
+            total_episode=1, lack_episode=0, note=[1],
+            last_update="2026-07-27 08:30:00",
+        ),
+        _subscription(34, "", name="测试电影", type="电影", year="2026"),
     ]
     completed = [
         _subscription(
-            33, "", name="已完结剧", season=1, total_episode=10,
-            lack_episode=0, date="2026-07-28 08:00:00",
+            33, "", name="与你相恋到生命尽头", year="2026",
+            season=1, total_episode=4, start_episode=4,
+            date="2026-07-28 08:00:00",
         ),
     ]
     message = format_subscription_summary(
-        datetime(2026, 7, 28, 9, 0), active, completed, "all"
+        datetime(2026, 7, 28, 9, 0), active, completed, ["updated"]
     )
-    assert message.startswith("📺 每日订阅汇总｜07月28日 周二")
-    assert "脱口秀和Ta的朋友们 S03｜10/12集｜缺失2集｜订阅中" in message
-    assert "测试电影 (2026)｜新建" in message
-    assert "🟢 今日已完成" in message
-    assert "已完结剧 S01" in message
-    assert "未完成 2 · 今日完成 1" in message
+    assert message == "\n".join([
+        "**电视剧更新**",
+        "📺︎与你相恋到生命尽头 (2026) S01E04",
+        "📺︎依然的喜事 (2026) S01E19-E20",
+    ])
+    assert "测试电影" not in message
+    assert "一斩苍穹" not in message
 
 
-def test_form_exposes_media_type_keywords_rule_group_and_two_crons():
+def test_summary_scope_is_multi_select_and_all_takes_precedence():
+    assert normalize_summary_scopes(["updated", "not_updated"]) == [
+        "updated", "not_updated"
+    ]
+    assert normalize_summary_scopes(["updated", "all"]) == ["all"]
+    assert normalize_summary_scopes("unfinished") == ["not_updated"]
+
+
+def test_form_exposes_rule_fields_and_one_summary_cron_without_calendar():
     plugin = VarietySubscribeAssistant()
     plugin._filter_groups = ["日常观影"]
     form, defaults = plugin.get_form()
@@ -328,25 +352,29 @@ def test_form_exposes_media_type_keywords_rule_group_and_two_crons():
     assert defaults["include"] == "正片"
     assert defaults["exclude"] == ""
     assert defaults["filter_groups"] == ["日常观影"]
-    assert defaults["calendar_cron"] == "0 8 * * *"
     assert defaults["summary_cron"] == "0 9 * * *"
+    assert defaults["summary_scopes"] == ["all"]
     assert "包含关键词" in serialized
     assert "排除关键词" in serialized
     assert "过滤规则组" in serialized
-    assert "每日订阅状态汇总" in serialized
+    assert "电视剧更新汇总" in serialized
+    assert "追剧排期" not in serialized
+    assert "calendar_" not in serialized
+    assert "'multiple': True" in serialized
 
 
 def test_summary_cron_service_and_immediate_notification_use_mp_channel():
     plugin = VarietySubscribeAssistant()
     plugin._enabled = True
     plugin._summary_enabled = True
-    plugin._summary_scope = "unfinished"
+    plugin._summary_scopes = ["not_updated"]
     plugin._summary_cron = "5 9 * * *"
     plugin._summary_max_items = 80
     _SubscribeOper.records = [
         _subscription(
             40, "", name="汇总测试剧", season=2,
-            total_episode=10, lack_episode=1,
+            year="2026", total_episode=10, lack_episode=1,
+            note=[9], last_update="2026-07-27 09:00:00",
         )
     ]
     plugin._completed_today = lambda _now: []
@@ -356,8 +384,9 @@ def test_summary_cron_service_and_immediate_notification_use_mp_channel():
     plugin.send_subscription_summary(source="测试")
     assert len(plugin._test_messages) == 1
     message = plugin._test_messages[0]
-    assert message["title"] == "每日订阅汇总"
-    assert "汇总测试剧 S02｜9/10集｜缺失1集" in message["text"]
+    assert message["title"] == "电视剧更新"
+    assert "**电视剧未更新**" in message["text"]
+    assert "📺︎汇总测试剧 (2026) S02E09" in message["text"]
 
 
 def test_subscription_words_rename_unique_match_and_keep_original_without_match():
