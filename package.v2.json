@@ -71,22 +71,6 @@
       "v0.1.0": "首次发布：下载前同步拦截，综合磁盘空闲、保留空间、未完成任务剩余量、安全倍率及并发短期预留判断是否允许下载"
     }
   },
-  "DramaCalendar": {
-    "name": "追剧更新日历（已合并）",
-    "description": "功能已合并到订阅助手；更新后自动迁移原配置并停用旧任务。",
-    "labels": "订阅,迁移,通知",
-    "version": "0.1.2",
-    "icon": "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/drama-calendar.svg",
-    "author": "g-steven037",
-    "level": 1,
-    "v2": true,
-    "system_version": ">=2.14.4,<3",
-    "history": {
-      "v0.1.2": "追剧排期功能正式合并到订阅助手；升级后自动迁移原媒体服务器、TMDB、Cron、通知范围和缓存参数，并停用旧Cron以防重复通知",
-      "v0.1.1": "增加通知范围下拉选择（全都、仅已入库、仅未入库），通知改为按日期分组并分别展示待入库和已入库剧集及汇总统计",
-      "v0.1.0": "首次发布：自动读取MoviePilot媒体服务器和TMDB配置，支持Cron、立即运行、未来排期、入库状态、SQLite单文件缓存、限流重试及脱敏日志，不注册Bot命令"
-    }
-  },
   "EmbyActorChinese": {
     "name": "Emby角色中文化",
     "description": "按影视名称和年份匹配豆瓣演职员表，将演员角色名中文化并同步到Emby，仅自用测试。",
@@ -124,15 +108,16 @@
   },
   "VarietySubscribeAssistant": {
     "name": "订阅助手",
-    "description": "为新增订阅应用媒体类型、类别、包含/排除关键词和规则组策略，并按Cron发送追剧排期及每日订阅状态汇总，仅自用测试。",
-    "labels": "订阅,规则组,关键词,追剧,通知",
-    "version": "0.2.1",
+    "description": "为新增订阅应用媒体类型、类别、包含/排除关键词和规则组策略，并按Cron发送电视剧更新汇总，仅自用测试。",
+    "labels": "订阅,规则组,关键词,更新,通知",
+    "version": "0.3.0",
     "icon": "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/subscribe-assistant.svg",
     "author": "g-steven037",
     "level": 1,
     "v2": true,
     "system_version": ">=2.14.4,<3",
     "history": {
+      "v0.3.0": "删除追剧排期、媒体服务器、TMDB和SQLite缓存模块；订阅汇总改为电视剧更新格式，按实际已下载集生成SxxExx区间；通知范围改为可多选的全部、未更新、已更新",
       "v0.2.1": "修复MoviePilot安装后静默跳过加载：内部追剧日历类改为私有别名，避免入口类扫描优先误认DramaCalendar，确保正确加载VarietySubscribeAssistant",
       "v0.2.0": "合并追剧更新日历并兼容迁移旧配置；新增电影/电视剧/全部类型、可选媒体类别、包含与排除关键词、多规则组下拉设置；新增Cron每日订阅汇总，可选择未完成、今日已完成或全部订阅，并支持立即发送测试",
       "v0.1.0": "首次发布：监听新增订阅事件，识别综艺分类后自动将包含规则设为正片、过滤规则组设为日常观影；使用唯一ID VarietySubscribeAssistant，避免与市场现有SubscribeAssistant冲突"

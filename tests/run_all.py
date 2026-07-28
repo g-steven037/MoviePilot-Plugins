@@ -12,7 +12,6 @@ import test_plugin_security as plugin
 import test_rapid as rapid
 import test_emby_library_cover as emby
 import test_download_capacity_guard as capacity
-import test_drama_calendar as calendar
 import test_emby_actor_chinese as actor_chinese
 import test_subscribe_assistant as subscribe_assistant
 
@@ -62,10 +61,6 @@ def main() -> int:
     capacity.test_guard_counts_active_remaining_and_concurrent_reservations(temporary_path())
     capacity.test_guard_rejects_unknown_size_and_calculates_remaining(temporary_path())
     capacity.test_guard_form_defaults_are_fail_closed()
-    calendar.test_calendar_formats_multiple_days_and_episode_ranges()
-    calendar.test_cache_persists_and_prunes_safely(temporary_path())
-    calendar.test_moviepilot_media_config_is_resolved_without_logging_secrets()
-    calendar.test_form_uses_moviepilot_notification_defaults_without_bot_commands()
     actor_chinese.test_actor_mapping_is_unique_exact_and_actor_only()
     actor_chinese.test_actor_mapping_accepts_only_unique_surname_order_variants()
     actor_chinese.test_emby_item_selection_requires_exact_title_year_and_unique_result()
@@ -75,15 +70,20 @@ def main() -> int:
     subscribe_assistant.test_plugin_is_visible_without_site_authentication()
     subscribe_assistant.test_variety_subscription_gets_strict_main_feature_policy()
     subscribe_assistant.test_variety_subscription_policy_does_not_touch_other_categories()
+    subscribe_assistant.test_subscription_summary_formats_active_and_today_completed()
+    subscribe_assistant.test_summary_scope_is_multi_select_and_all_takes_precedence()
+    subscribe_assistant.test_form_exposes_rule_fields_and_one_summary_cron_without_calendar()
+    subscribe_assistant.test_summary_cron_service_and_immediate_notification_use_mp_channel()
     subscribe_assistant.test_subscription_words_rename_unique_match_and_keep_original_without_match()
     subscribe_assistant.test_ambiguous_subscription_words_keep_original_name()
     subscribe_assistant.test_subscription_events_only_invalidate_cache_and_never_write_database()
     subscribe_assistant.test_link_file_uses_subscription_rename_and_preserves_source(temporary_path())
     subscribe_assistant.test_link_file_without_custom_words_uses_original_relative_path(temporary_path())
     subscribe_assistant.test_download_temp_extensions_are_skipped()
-    print("All 56 unit, security, rendering, realtime, capacity-control, calendar, actor, and subscription-assistant tests passed.")
+    print("All unit, security, rendering, realtime, capacity-control, actor, and subscription-assistant tests passed.")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
