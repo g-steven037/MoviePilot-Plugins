@@ -15,9 +15,10 @@ security._install_stubs()
 PLUGIN_ROOT = Path(__file__).parents[1] / "plugins.v2"
 sys.path.insert(0, str(PLUGIN_ROOT))
 
-from dramacalendar import DramaCalendar, format_calendar
-from dramacalendar.cache import ShowCache
-from dramacalendar.client import EpisodeUpdate
+from varietysubscribeassistant.calendar import DramaCalendar, format_calendar
+from varietysubscribeassistant.cache import ShowCache
+from varietysubscribeassistant.client import EpisodeUpdate
+from dramacalendar import DramaCalendar as LegacyDramaCalendar
 
 
 def test_calendar_formats_multiple_days_and_episode_ranges():
@@ -105,3 +106,24 @@ def test_form_uses_moviepilot_notification_defaults_without_bot_commands():
     assert "/calendar" not in serialized
     assert "/today" not in serialized
     assert not hasattr(plugin, "get_command")
+
+
+def test_legacy_plugin_migrates_config_and_disables_its_scheduler():
+    plugin = LegacyDramaCalendar()
+    plugin._test_configs["VarietySubscribeAssistant"] = {"enabled": True}
+    plugin.init_plugin({
+        "enabled": True,
+        "notify_enabled": True,
+        "notification_scope": "missing",
+        "cron": "15 8 * * *",
+        "calendar_days": 5,
+    })
+    target = plugin._test_configs["VarietySubscribeAssistant"]
+    legacy = plugin._test_configs["DramaCalendar"]
+    assert target["calendar_enabled"] is True
+    assert target["calendar_notification_scope"] == "missing"
+    assert target["calendar_cron"] == "15 8 * * *"
+    assert target["calendar_days"] == 5
+    assert legacy["enabled"] is False
+    assert plugin.get_service() == []
+
