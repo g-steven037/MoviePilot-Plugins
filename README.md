@@ -250,6 +250,8 @@ v0.3.1 将显示名称调整为“识别词硬链接”，插件 ID 仍为 `Subs
 
 插件 ID 为 `VarietySubscribeAssistant`，与市场中已有的 `SubscribeAssistant` 及本仓库的 `SubscribeLinkRenamer` 均不冲突。
 
+v0.2.1 修复MoviePilot安装后静默跳过加载的问题：内部追剧日历实现改为私有别名，避免入口类扫描误认，确保加载目标类`VarietySubscribeAssistant`。
+
 ## 新增订阅规则
 
 - 媒体类型可选择“全部”“电视剧”或“电影”。

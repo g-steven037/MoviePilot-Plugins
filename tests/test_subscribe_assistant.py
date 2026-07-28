@@ -164,9 +164,21 @@ def test_plugin_is_visible_without_site_authentication():
     assert SubscribeLinkRenamer.plugin_version == "0.3.1"
     assert SubscribeLinkRenamer.auth_level == 1
     assert VarietySubscribeAssistant.plugin_name == "订阅助手"
-    assert VarietySubscribeAssistant.plugin_version == "0.2.0"
+    assert VarietySubscribeAssistant.plugin_version == "0.2.1"
     assert VarietySubscribeAssistant.plugin_config_prefix == "varietysubscribeassistant_"
     assert VarietySubscribeAssistant.auth_level == 1
+
+
+def test_moviepilot_entry_scan_finds_target_plugin_class_first():
+    module = sys.modules["varietysubscribeassistant"]
+    discovered = []
+    for name, obj in module.__dict__.items():
+        if name.startswith("_") or not isinstance(obj, type):
+            continue
+        if hasattr(obj, "init_plugin") and hasattr(obj, "plugin_name"):
+            discovered.append((name, obj.__name__))
+            break
+    assert discovered == [("VarietySubscribeAssistant", "VarietySubscribeAssistant")]
 
 
 def _subscription(sid, words, **kwargs):

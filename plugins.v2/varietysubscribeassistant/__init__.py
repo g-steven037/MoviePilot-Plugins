@@ -13,7 +13,7 @@ from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, NotificationType
 
-from .calendar import DramaCalendar
+from .calendar import DramaCalendar as _DramaCalendar
 
 
 WEEKDAYS = "一二三四五六日"
@@ -122,7 +122,7 @@ class VarietySubscribeAssistant(_PluginBase):
     plugin_name = "订阅助手"
     plugin_desc = "为新增订阅应用类型、关键词和规则组策略，并按Cron发送追剧排期及订阅状态汇总。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/subscribe-assistant.svg"
-    plugin_version = "0.2.0"
+    plugin_version = "0.2.1"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "varietysubscribeassistant_"
@@ -142,7 +142,7 @@ class VarietySubscribeAssistant(_PluginBase):
     _summary_cron = "0 9 * * *"
     _summary_max_items = 80
     _summary_lock = threading.Lock()
-    _calendar: Optional[DramaCalendar] = None
+    _calendar: Optional[_DramaCalendar] = None
 
     _CALENDAR_KEYS = {
         "notify_enabled": "calendar_notify_enabled",
@@ -196,7 +196,7 @@ class VarietySubscribeAssistant(_PluginBase):
                 self._summary_enabled = False
                 logger.error("#订阅助手# 每日订阅汇总Cron无效，汇总任务未启动 [CRON_INVALID]")
 
-        self._calendar = DramaCalendar()
+        self._calendar = _DramaCalendar()
         calendar_config = self._calendar_config(config)
         try:
             self._calendar.init_plugin(calendar_config)
@@ -549,7 +549,7 @@ class VarietySubscribeAssistant(_PluginBase):
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         rule_items = self._rule_group_items()
         try:
-            server_items = DramaCalendar._moviepilot_media_items()
+            server_items = _DramaCalendar._moviepilot_media_items()
         except Exception:
             server_items = []
         content: List[dict] = [{
