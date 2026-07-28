@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import threading
+import re
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
@@ -29,30 +31,12 @@ def _record_type(record: Any) -> str:
     return str(getattr(value, "value", value) or "").strip()
 
 
-def _episode_numbers(record: Any) -> List[int]:
-    numbers = set()
-    for value in getattr(record, "note", None) or []:
-        episode = _integer(value, 0)
-        if episode > 0:
-            numbers.add(episode)
-    for value, priority in (getattr(record, "episode_priority", None) or {}).items():
-        episode = _integer(value, 0)
-        try:
-            downloaded = float(priority) > 0
-        except (TypeError, ValueError, OverflowError):
-            downloaded = False
-        if episode > 0 and downloaded:
-            numbers.add(episode)
-    if numbers:
-        return sorted(numbers)
-
-    start = max(_integer(getattr(record, "start_episode", 1), 1), 1)
-    total = max(_integer(getattr(record, "total_episode", 0), 0), 0)
-    lack = max(_integer(getattr(record, "lack_episode", 0), 0), 0)
-    end = total if not hasattr(record, "lack_episode") else max(total - lack, 0)
-    if end >= start:
-        return list(range(start, end + 1))
-    return []
+@dataclass
+class _SummaryItem:
+    name: str
+    year: str
+    season: int
+    episodes: set[int] = field(default_factory=set)
 
 
 def _episode_range(numbers: Sequence[int]) -> str:
@@ -74,21 +58,92 @@ def _episode_range(numbers: Sequence[int]) -> str:
     )
 
 
-def _record_line(record: Any) -> str:
+def _record_line(record: Any, episodes: Sequence[int] = ()) -> str:
     name = _record_name(record)
     year = str(getattr(record, "year", "") or "").strip()
     season = max(_integer(getattr(record, "season", 1), 1), 0)
-    episode_text = _episode_range(_episode_numbers(record))
+    episode_text = _episode_range(episodes)
     year_text = f" ({year})" if year else ""
     season_text = f" S{season:02}" if season > 0 else ""
     return f"📺︎{name}{year_text}{season_text}{episode_text}"
 
 
-def _is_updated_today(record: Any, now: datetime) -> bool:
-    today = now.strftime("%Y-%m-%d")
-    if hasattr(record, "lack_episode"):
-        return str(getattr(record, "last_update", "") or "").strip().startswith(today)
-    return str(getattr(record, "date", "") or "").strip().startswith(today)
+def _parse_prefixed_numbers(value: Any, prefix: str) -> List[int]:
+    text = str(value or "")
+    pattern = re.compile(
+        rf"(?i){re.escape(prefix)}\s*(\d{{1,5}})"
+        rf"(?:\s*[-~～]\s*(?:{re.escape(prefix)}\s*)?(\d{{1,5}}))?"
+    )
+    numbers = set()
+    for start_text, end_text in pattern.findall(text):
+        start = _integer(start_text, 0)
+        end = _integer(end_text, start) if end_text else start
+        if start <= 0 or end < start or end - start > 5000:
+            continue
+        numbers.update(range(start, end + 1))
+    return sorted(numbers)
+
+
+def _identity_candidates(record: Any) -> List[Tuple[str, str]]:
+    candidates: List[Tuple[str, str]] = []
+    source = str(getattr(record, "media_source", "") or "").strip().casefold()
+    media_id = str(getattr(record, "media_id", "") or "").strip()
+    if source and media_id:
+        candidates.append((f"source:{source}", media_id))
+    for field_name in ("tmdbid", "doubanid", "bangumiid", "anilistid"):
+        value = str(getattr(record, field_name, "") or "").strip()
+        if value:
+            candidates.append((field_name, value))
+    name = _record_name(record).casefold()
+    year = str(getattr(record, "year", "") or "").strip()
+    if name:
+        candidates.append(("title", f"{name}|{year}"))
+    return candidates
+
+
+def _match_subscription(record: Any, subscriptions: Sequence[Any]) -> Any:
+    identities = set(_identity_candidates(record))
+    for subscription in subscriptions:
+        if identities.intersection(_identity_candidates(subscription)):
+            return subscription
+    return None
+
+
+def _updated_items(
+    downloads_today: Sequence[Any],
+    subscriptions: Sequence[Any],
+) -> Tuple[List[_SummaryItem], set[Tuple[str, str, int]]]:
+    grouped: Dict[Tuple[str, str, int], _SummaryItem] = {}
+    updated_keys: set[Tuple[str, str, int]] = set()
+    for download in downloads_today:
+        if _record_type(download) != "电视剧":
+            continue
+        subscription = _match_subscription(download, subscriptions)
+        if subscription is None:
+            continue
+        seasons = _parse_prefixed_numbers(getattr(download, "seasons", ""), "S")
+        season = seasons[0] if seasons else max(
+            _integer(getattr(subscription, "season", 1), 1), 0
+        )
+        episodes = _parse_prefixed_numbers(getattr(download, "episodes", ""), "E")
+        if not episodes:
+            episodes = _parse_prefixed_numbers(
+                getattr(download, "torrent_name", ""), "E"
+            )
+        name = _record_name(subscription)
+        year = str(
+            getattr(subscription, "year", "")
+            or getattr(download, "year", "")
+            or ""
+        ).strip()
+        key = (name, year, season)
+        item = grouped.setdefault(
+            key,
+            _SummaryItem(name=name, year=year, season=season),
+        )
+        item.episodes.update(episodes)
+        updated_keys.add(key)
+    return sorted(grouped.values(), key=lambda item: (item.name, item.season)), updated_keys
 
 
 def normalize_summary_scopes(value: Any) -> List[str]:
@@ -119,13 +174,17 @@ def format_subscription_summary(
     now: datetime,
     active: Sequence[Any],
     completed_today: Sequence[Any],
+    downloads_today: Sequence[Any],
     scopes: Any = ("all",),
     max_items: int = 80,
 ) -> str:
-    """按更新状态生成电视剧订阅汇总。"""
+    """按当天实际下载历史生成电视剧订阅汇总。"""
     selected_scopes = normalize_summary_scopes(scopes)
     max_items = min(max(_integer(max_items, 80), 1), 200)
-    records = [item for item in [*active, *completed_today] if _record_type(item) == "电视剧"]
+    records = [
+        item for item in [*active, *completed_today]
+        if _record_type(item) == "电视剧"
+    ]
     deduplicated: Dict[Tuple[str, str, int], Any] = {}
     for item in records:
         key = (
@@ -133,15 +192,15 @@ def format_subscription_summary(
             str(getattr(item, "year", "") or ""),
             _integer(getattr(item, "season", 0), 0),
         )
-        current = deduplicated.get(key)
-        if current is None or _is_updated_today(item, now):
+        if key not in deduplicated or hasattr(item, "lack_episode"):
             deduplicated[key] = item
-    updated = sorted(
-        [item for item in deduplicated.values() if _is_updated_today(item, now)],
-        key=lambda item: (_record_name(item), _integer(getattr(item, "season", 0), 0)),
-    )
+    subscriptions = list(deduplicated.values())
+    updated, updated_keys = _updated_items(downloads_today, subscriptions)
     not_updated = sorted(
-        [item for item in deduplicated.values() if not _is_updated_today(item, now)],
+        [
+            item for key, item in deduplicated.items()
+            if key not in updated_keys and hasattr(item, "lack_episode")
+        ],
         key=lambda item: (_record_name(item), _integer(getattr(item, "season", 0), 0)),
     )
     include_updated = "all" in selected_scopes or "updated" in selected_scopes
@@ -151,7 +210,7 @@ def format_subscription_summary(
     if include_updated:
         lines.append("**电视剧更新**")
         selected = updated[:remaining]
-        lines.extend(_record_line(item) for item in selected)
+        lines.extend(_record_line(item, sorted(item.episodes)) for item in selected)
         remaining -= len(selected)
         if len(updated) > len(selected):
             lines.append(f"……另有 {len(updated) - len(selected)} 部")
@@ -176,7 +235,7 @@ class VarietySubscribeAssistant(_PluginBase):
     plugin_name = "订阅助手"
     plugin_desc = "为新增订阅应用类型、关键词和规则组策略，并按Cron发送电视剧更新汇总。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/subscribe-assistant.svg"
-    plugin_version = "0.3.0"
+    plugin_version = "0.3.1"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "varietysubscribeassistant_"
@@ -419,6 +478,22 @@ class VarietySubscribeAssistant(_PluginBase):
             )
             return []
 
+    def _downloads_today(self, now: datetime) -> List[Any]:
+        try:
+            from app.db.downloadhistory_oper import DownloadHistoryOper
+
+            return [
+                item for item in (
+                    DownloadHistoryOper().list_by_type("电视剧", days=1) or []
+                )
+                if self._is_today(item, now)
+            ]
+        except Exception as exc:
+            logger.warning(
+                f"#订阅助手# 读取当天下载历史失败 [{type(exc).__name__.upper()}]"
+            )
+            return []
+
     def send_subscription_summary(self, source: str = "Cron"):
         if not self._enabled or not self._summary_enabled:
             return
@@ -432,22 +507,25 @@ class VarietySubscribeAssistant(_PluginBase):
                 if _record_type(item) == "电视剧"
             ]
             completed = self._completed_today(now)
+            downloads = self._downloads_today(now)
             message = format_subscription_summary(
                 now,
                 active,
                 completed,
+                downloads,
                 self._summary_scopes,
                 self._summary_max_items,
             )
             self.post_message(
                 mtype=NotificationType.Plugin,
-                title="电视剧更新",
+                title="订阅汇总",
                 text=message,
                 username=settings.SUPERUSER,
             )
             logger.info(
                 f"#订阅助手# 每日订阅汇总已提交 | 来源={self._safe_name(source)} | "
                 f"活动订阅={len(active)} | 今日完成={len(completed)} | "
+                f"当天下载={len(downloads)} | "
                 f"范围={','.join(self._summary_scopes)}"
             )
         except Exception as exc:
@@ -508,7 +586,7 @@ class VarietySubscribeAssistant(_PluginBase):
             "props": {
                 "type": "info",
                 "variant": "tonal",
-                "text": "新增订阅规则只作用于插件启用后创建的订阅。电视剧更新汇总直接读取MoviePilot订阅和今日完成历史。",
+                "text": "新增订阅规则只作用于插件启用后创建的订阅。电视剧更新汇总使用MoviePilot当天真实下载历史计算集数。",
             },
         }, {
             "component": "VRow",
