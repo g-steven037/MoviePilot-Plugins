@@ -186,6 +186,7 @@ def test_moviepilot_entry_scan_finds_target_plugin_class_first():
 
 
 def _subscription(sid, words, **kwargs):
+    history = bool(kwargs.pop("_history", False))
     values = {
         "id": sid,
         "name": f"订阅{sid}",
@@ -207,7 +208,11 @@ def _subscription(sid, words, **kwargs):
         "last_update": "",
     }
     values.update(kwargs)
-    return types.SimpleNamespace(**values)
+    record = types.SimpleNamespace(**values)
+    if history:
+        for field in ("lack_episode", "last_update", "state", "note"):
+            delattr(record, field)
+    return record
 
 
 def test_variety_subscription_gets_strict_main_feature_policy():
@@ -320,7 +325,7 @@ def test_subscription_summary_formats_active_and_today_completed():
         _subscription(
             33, "", name="与你相恋到生命尽头", year="2026",
             season=1, total_episode=4, start_episode=4,
-            date="2026-07-28 08:00:00",
+            date="2026-07-28 08:00:00", _history=True,
         ),
     ]
     message = format_subscription_summary(
