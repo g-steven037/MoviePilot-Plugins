@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import types
+from datetime import datetime
 from pathlib import Path
 
 import test_plugin_security as security
@@ -123,8 +124,12 @@ sys.modules["app.db.subscribe_oper"] = app_db_subscribe
 sys.modules["app.utils"] = app_utils
 sys.modules["app.utils.system"] = app_utils_system
 sys.modules["app.schemas.types"].EventType = _EventType
-sys.modules["app.schemas.types"].NotificationType = types.SimpleNamespace(Manual="manual")
-sys.modules["app.schemas"].NotificationType = types.SimpleNamespace(Manual="manual")
+sys.modules["app.schemas.types"].NotificationType = types.SimpleNamespace(
+    Manual="manual", Plugin="plugin"
+)
+sys.modules["app.schemas"].NotificationType = types.SimpleNamespace(
+    Manual="manual", Plugin="plugin"
+)
 sys.modules["app.schemas"].Response = lambda **kwargs: types.SimpleNamespace(**kwargs)
 settings = sys.modules["app.core.config"].settings
 settings.DOWNLOAD_TMPEXT = [".!qB", ".part"]
@@ -144,8 +149,14 @@ sys.modules["watchfiles"] = watchfiles
 PLUGIN_ROOT = Path(__file__).parents[1] / "plugins.v2"
 sys.path.insert(0, str(PLUGIN_ROOT))
 
+for module_name in list(sys.modules):
+    if module_name == "varietysubscribeassistant" or module_name.startswith(
+        "varietysubscribeassistant."
+    ):
+        sys.modules.pop(module_name, None)
+
 from subscribelinkrenamer import SubscribeLinkRenamer, _is_download_tmp_file
-from varietysubscribeassistant import VarietySubscribeAssistant
+from varietysubscribeassistant import VarietySubscribeAssistant, format_subscription_summary
 
 
 def test_plugin_is_visible_without_site_authentication():
@@ -153,7 +164,7 @@ def test_plugin_is_visible_without_site_authentication():
     assert SubscribeLinkRenamer.plugin_version == "0.3.1"
     assert SubscribeLinkRenamer.auth_level == 1
     assert VarietySubscribeAssistant.plugin_name == "订阅助手"
-    assert VarietySubscribeAssistant.plugin_version == "0.1.0"
+    assert VarietySubscribeAssistant.plugin_version == "0.2.0"
     assert VarietySubscribeAssistant.plugin_config_prefix == "varietysubscribeassistant_"
     assert VarietySubscribeAssistant.auth_level == 1
 
@@ -164,8 +175,16 @@ def _subscription(sid, words, **kwargs):
         "name": f"订阅{sid}",
         "custom_words": words,
         "media_category": "",
+        "type": "电视剧",
         "include": "",
+        "exclude": "",
         "filter_groups": [],
+        "state": "R",
+        "season": 1,
+        "total_episode": 0,
+        "lack_episode": 0,
+        "year": "",
+        "date": "",
     }
     values.update(kwargs)
     return types.SimpleNamespace(**values)
@@ -187,6 +206,7 @@ def test_variety_subscription_gets_strict_main_feature_policy():
     assert subscribe.filter_groups == ["日常观影"]
     assert _SubscribeOper.update_calls == [(21, {
         "include": "正片",
+        "exclude": "",
         "filter_groups": ["日常观影"],
     })]
 
@@ -209,6 +229,123 @@ def test_variety_subscription_policy_does_not_touch_other_categories():
     assert subscribe.include == "保留规则"
     assert subscribe.filter_groups == ["原规则组"]
     assert _SubscribeOper.update_calls == []
+
+
+def test_generic_movie_policy_supports_exclude_and_multiple_rule_groups():
+    plugin = VarietySubscribeAssistant()
+    plugin.init_plugin({
+        "enabled": True,
+        "media_type": "电影",
+        "media_category": "",
+        "include": "国语",
+        "exclude": "枪版|TC",
+        "filter_groups": ["高质量电影", "备用电影"],
+    })
+    subscribe = _subscription(
+        23, "", name="测试电影", type="电影", media_category="电影",
+    )
+    _SubscribeOper.records = [subscribe]
+    _SubscribeOper.update_calls = []
+
+    plugin.apply_variety_policy(types.SimpleNamespace(event_data={
+        "subscribe_id": 23,
+        "mediainfo": {"type": "电影", "category": "电影"},
+    }))
+
+    assert subscribe.include == "国语"
+    assert subscribe.exclude == "枪版|TC"
+    assert subscribe.filter_groups == ["高质量电影", "备用电影"]
+
+
+def test_include_can_be_explicitly_cleared_for_non_variety_policy():
+    plugin = VarietySubscribeAssistant()
+    plugin.init_plugin({
+        "enabled": True,
+        "media_type": "电影",
+        "media_category": "",
+        "include": "",
+        "exclude": "TC",
+        "filter_groups": [],
+    })
+    subscribe = _subscription(
+        24, "", name="无包含词电影", type="电影",
+        include="旧包含词", filter_groups=["旧规则组"],
+    )
+    _SubscribeOper.records = [subscribe]
+    _SubscribeOper.update_calls = []
+    plugin.apply_variety_policy(types.SimpleNamespace(event_data={
+        "subscribe_id": 24,
+        "mediainfo": {"type": "电影", "category": "电影"},
+    }))
+    assert subscribe.include == ""
+    assert subscribe.exclude == "TC"
+    assert subscribe.filter_groups == []
+
+
+def test_subscription_summary_formats_active_and_today_completed():
+    active = [
+        _subscription(
+            31, "", name="脱口秀和Ta的朋友们", season=3,
+            total_episode=12, lack_episode=2, state="R",
+        ),
+        _subscription(32, "", name="测试电影", type="电影", year="2026", state="N"),
+    ]
+    completed = [
+        _subscription(
+            33, "", name="已完结剧", season=1, total_episode=10,
+            lack_episode=0, date="2026-07-28 08:00:00",
+        ),
+    ]
+    message = format_subscription_summary(
+        datetime(2026, 7, 28, 9, 0), active, completed, "all"
+    )
+    assert message.startswith("📺 每日订阅汇总｜07月28日 周二")
+    assert "脱口秀和Ta的朋友们 S03｜10/12集｜缺失2集｜订阅中" in message
+    assert "测试电影 (2026)｜新建" in message
+    assert "🟢 今日已完成" in message
+    assert "已完结剧 S01" in message
+    assert "未完成 2 · 今日完成 1" in message
+
+
+def test_form_exposes_media_type_keywords_rule_group_and_two_crons():
+    plugin = VarietySubscribeAssistant()
+    plugin._filter_groups = ["日常观影"]
+    form, defaults = plugin.get_form()
+    serialized = repr(form)
+    assert defaults["media_type"] == "电视剧"
+    assert defaults["include"] == "正片"
+    assert defaults["exclude"] == ""
+    assert defaults["filter_groups"] == ["日常观影"]
+    assert defaults["calendar_cron"] == "0 8 * * *"
+    assert defaults["summary_cron"] == "0 9 * * *"
+    assert "包含关键词" in serialized
+    assert "排除关键词" in serialized
+    assert "过滤规则组" in serialized
+    assert "每日订阅状态汇总" in serialized
+
+
+def test_summary_cron_service_and_immediate_notification_use_mp_channel():
+    plugin = VarietySubscribeAssistant()
+    plugin._enabled = True
+    plugin._summary_enabled = True
+    plugin._summary_scope = "unfinished"
+    plugin._summary_cron = "5 9 * * *"
+    plugin._summary_max_items = 80
+    _SubscribeOper.records = [
+        _subscription(
+            40, "", name="汇总测试剧", season=2,
+            total_episode=10, lack_episode=1,
+        )
+    ]
+    plugin._completed_today = lambda _now: []
+    services = plugin.get_service()
+    assert len(services) == 1
+    assert services[0]["id"] == "VarietySubscribeAssistant_summary"
+    plugin.send_subscription_summary(source="测试")
+    assert len(plugin._test_messages) == 1
+    message = plugin._test_messages[0]
+    assert message["title"] == "每日订阅汇总"
+    assert "汇总测试剧 S02｜9/10集｜缺失1集" in message["text"]
 
 
 def test_subscription_words_rename_unique_match_and_keep_original_without_match():
@@ -289,3 +426,4 @@ def test_download_temp_extensions_are_skipped():
     assert _is_download_tmp_file(Path("episode.mkv.!qB"))
     assert _is_download_tmp_file(Path("episode.part"))
     assert not _is_download_tmp_file(Path("episode.mkv"))
+
