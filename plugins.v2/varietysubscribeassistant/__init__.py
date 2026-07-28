@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 from apscheduler.triggers.cron import CronTrigger
 
@@ -12,18 +12,6 @@ from app.db.subscribe_oper import SubscribeOper
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, NotificationType
-
-from .calendar import DramaCalendar as _DramaCalendar
-
-
-WEEKDAYS = "一二三四五六日"
-ACTIVE_STATE_NAMES = {
-    "N": "新建",
-    "R": "订阅中",
-    "P": "待定",
-    "S": "暂停",
-}
-
 
 def _integer(value: Any, default: int = 0) -> int:
     try:
@@ -41,88 +29,155 @@ def _record_type(record: Any) -> str:
     return str(getattr(value, "value", value) or "").strip()
 
 
-def _record_label(record: Any) -> str:
-    name = _record_name(record)
-    year = str(getattr(record, "year", "") or "").strip()
-    season = _integer(getattr(record, "season", 0), 0)
-    if _record_type(record) == "电视剧" and season > 0:
-        return f"{name} S{season:02}"
-    if year:
-        return f"{name} ({year})"
-    return name
+def _episode_numbers(record: Any) -> List[int]:
+    numbers = set()
+    for value in getattr(record, "note", None) or []:
+        episode = _integer(value, 0)
+        if episode > 0:
+            numbers.add(episode)
+    for value, priority in (getattr(record, "episode_priority", None) or {}).items():
+        episode = _integer(value, 0)
+        try:
+            downloaded = float(priority) > 0
+        except (TypeError, ValueError, OverflowError):
+            downloaded = False
+        if episode > 0 and downloaded:
+            numbers.add(episode)
+    if numbers:
+        return sorted(numbers)
 
-
-def _active_line(record: Any) -> str:
-    label = _record_label(record)
-    state = ACTIVE_STATE_NAMES.get(
-        str(getattr(record, "state", "") or "").upper(),
-        str(getattr(record, "state", "") or "订阅中"),
-    )
-    if _record_type(record) != "电视剧":
-        return f"{label}｜{state}"
+    start = max(_integer(getattr(record, "start_episode", 1), 1), 1)
     total = max(_integer(getattr(record, "total_episode", 0), 0), 0)
     lack = max(_integer(getattr(record, "lack_episode", 0), 0), 0)
-    if total <= 0:
-        return f"{label}｜{state}｜总集数待刷新"
-    completed = min(max(total - lack, 0), total)
-    return f"{label}｜{completed}/{total}集｜缺失{lack}集｜{state}"
+    end = total if not hasattr(record, "lack_episode") else max(total - lack, 0)
+    if end >= start:
+        return list(range(start, end + 1))
+    return []
+
+
+def _episode_range(numbers: Sequence[int]) -> str:
+    values = sorted({number for number in numbers if number > 0})
+    if not values:
+        return ""
+    ranges: List[Tuple[int, int]] = []
+    start = previous = values[0]
+    for value in values[1:]:
+        if value == previous + 1:
+            previous = value
+            continue
+        ranges.append((start, previous))
+        start = previous = value
+    ranges.append((start, previous))
+    return ",".join(
+        f"E{start:02}" if start == end else f"E{start:02}-E{end:02}"
+        for start, end in ranges
+    )
+
+
+def _record_line(record: Any) -> str:
+    name = _record_name(record)
+    year = str(getattr(record, "year", "") or "").strip()
+    season = max(_integer(getattr(record, "season", 1), 1), 0)
+    episode_text = _episode_range(_episode_numbers(record))
+    year_text = f" ({year})" if year else ""
+    season_text = f" S{season:02}" if season > 0 else ""
+    return f"📺︎{name}{year_text}{season_text}{episode_text}"
+
+
+def _is_updated_today(record: Any, now: datetime) -> bool:
+    today = now.strftime("%Y-%m-%d")
+    for field in ("last_update", "date"):
+        if str(getattr(record, field, "") or "").strip().startswith(today):
+            return True
+    return False
+
+
+def normalize_summary_scopes(value: Any) -> List[str]:
+    if isinstance(value, (list, tuple, set)):
+        raw = value
+    elif value is None:
+        raw = []
+    else:
+        raw = str(value).replace("，", ",").split(",")
+    aliases = {
+        "unfinished": "not_updated",
+        "completed": "updated",
+        "未更新": "not_updated",
+        "已更新": "updated",
+        "全部": "all",
+    }
+    scopes = []
+    for item in raw:
+        scope = aliases.get(str(item or "").strip(), str(item or "").strip())
+        if scope in {"all", "not_updated", "updated"} and scope not in scopes:
+            scopes.append(scope)
+    if not scopes or "all" in scopes:
+        return ["all"]
+    return scopes
 
 
 def format_subscription_summary(
     now: datetime,
-    unfinished: Sequence[Any],
+    active: Sequence[Any],
     completed_today: Sequence[Any],
-    scope: str = "all",
+    scopes: Any = ("all",),
     max_items: int = 80,
 ) -> str:
-    """生成每日订阅状态汇总。"""
-    if scope not in {"all", "unfinished", "completed"}:
-        raise ValueError("SUMMARY_SCOPE_INVALID")
+    """按更新状态生成电视剧订阅汇总。"""
+    selected_scopes = normalize_summary_scopes(scopes)
     max_items = min(max(_integer(max_items, 80), 1), 200)
-    active = sorted(unfinished, key=lambda item: (_record_type(item), _record_name(item), _integer(getattr(item, "season", 0))))
-    completed = sorted(
-        completed_today,
-        key=lambda item: str(getattr(item, "date", "") or ""),
-        reverse=True,
+    records = [item for item in [*active, *completed_today] if _record_type(item) == "电视剧"]
+    deduplicated: Dict[Tuple[str, str, int], Any] = {}
+    for item in records:
+        key = (
+            _record_name(item),
+            str(getattr(item, "year", "") or ""),
+            _integer(getattr(item, "season", 0), 0),
+        )
+        current = deduplicated.get(key)
+        if current is None or _is_updated_today(item, now):
+            deduplicated[key] = item
+    updated = sorted(
+        [item for item in deduplicated.values() if _is_updated_today(item, now)],
+        key=lambda item: (_record_name(item), _integer(getattr(item, "season", 0), 0)),
     )
-    lines = [
-        f"📺 每日订阅汇总｜{now.strftime('%m月%d日')} 周{WEEKDAYS[now.weekday()]}",
-        "",
-    ]
+    not_updated = sorted(
+        [item for item in deduplicated.values() if not _is_updated_today(item, now)],
+        key=lambda item: (_record_name(item), _integer(getattr(item, "season", 0), 0)),
+    )
+    include_updated = "all" in selected_scopes or "updated" in selected_scopes
+    include_not_updated = "all" in selected_scopes or "not_updated" in selected_scopes
+    lines: List[str] = []
     remaining = max_items
-    if scope in {"all", "unfinished"}:
-        lines.append("🔴 未完成订阅")
-        selected = active[:remaining]
-        lines.extend(_active_line(item) for item in selected)
+    if include_updated:
+        lines.append("**电视剧更新**")
+        selected = updated[:remaining]
+        lines.extend(_record_line(item) for item in selected)
         remaining -= len(selected)
-        if len(active) > len(selected):
-            lines.append(f"……另有 {len(active) - len(selected)} 个未完成订阅")
-        if not active:
+        if len(updated) > len(selected):
+            lines.append(f"……另有 {len(updated) - len(selected)} 部")
+        if not updated:
             lines.append("暂无")
-        lines.append("")
-    if scope in {"all", "completed"}:
-        lines.append("🟢 今日已完成")
-        selected = completed[:remaining]
-        lines.extend(_record_label(item) for item in selected)
-        if len(completed) > len(selected):
-            lines.append(f"……另有 {len(completed) - len(selected)} 个今日完成订阅")
-        if not completed:
+    if include_not_updated:
+        if lines:
+            lines.append("")
+        lines.append("**电视剧未更新**")
+        selected = not_updated[:remaining]
+        lines.extend(_record_line(item) for item in selected)
+        if len(not_updated) > len(selected):
+            lines.append(f"……另有 {len(not_updated) - len(selected)} 部")
+        if not not_updated:
             lines.append("暂无")
-        lines.append("")
-    lines.append(
-        f"共 {len(active) + len(completed)} 个 · "
-        f"未完成 {len(active)} · 今日完成 {len(completed)}"
-    )
     return "\n".join(lines)
 
 
 class VarietySubscribeAssistant(_PluginBase):
-    """订阅规则、追剧排期与每日订阅汇总的统一助手。"""
+    """新增订阅规则与每日电视剧更新汇总。"""
 
     plugin_name = "订阅助手"
-    plugin_desc = "为新增订阅应用类型、关键词和规则组策略，并按Cron发送追剧排期及订阅状态汇总。"
+    plugin_desc = "为新增订阅应用类型、关键词和规则组策略，并按Cron发送电视剧更新汇总。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/subscribe-assistant.svg"
-    plugin_version = "0.2.1"
+    plugin_version = "0.3.0"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "varietysubscribeassistant_"
@@ -136,35 +191,15 @@ class VarietySubscribeAssistant(_PluginBase):
     _include = "正片"
     _exclude = ""
     _filter_groups: List[str] = ["日常观影"]
-    _calendar_enabled = False
     _summary_enabled = False
-    _summary_scope = "all"
+    _summary_scopes: List[str] = ["all"]
     _summary_cron = "0 9 * * *"
     _summary_max_items = 80
     _summary_lock = threading.Lock()
-    _calendar: Optional[_DramaCalendar] = None
-
-    _CALENDAR_KEYS = {
-        "notify_enabled": "calendar_notify_enabled",
-        "notification_scope": "calendar_notification_scope",
-        "use_mp_config": "calendar_use_mp_config",
-        "media_server": "calendar_media_server",
-        "emby_url": "calendar_emby_url",
-        "emby_api_key": "calendar_emby_api_key",
-        "emby_user_id": "calendar_emby_user_id",
-        "tmdb_token": "calendar_tmdb_token",
-        "cron": "calendar_cron",
-        "timezone": "calendar_timezone",
-        "calendar_days": "calendar_days",
-        "tmdb_requests_per_second": "calendar_tmdb_requests_per_second",
-        "tmdb_max_retries": "calendar_tmdb_max_retries",
-        "cache_ttl_hours": "calendar_cache_ttl_hours",
-        "verify_https": "calendar_verify_https",
-    }
 
     def init_plugin(self, config: dict = None):
         self.stop_service()
-        config = self._with_legacy_calendar_config(dict(config or {}))
+        config = dict(config or {})
         self._enabled = bool(config.get("enabled", False))
         self._rule_enabled = bool(config.get("rule_enabled", True))
         self._media_type = self._normalize_media_type(config.get("media_type", "电视剧"))
@@ -178,12 +213,10 @@ class VarietySubscribeAssistant(_PluginBase):
         self._filter_groups = self._normalize_groups(
             config.get("filter_groups", config.get("filter_group", "日常观影"))
         )
-        self._calendar_enabled = bool(config.get("calendar_enabled", False))
         self._summary_enabled = bool(config.get("summary_enabled", False))
-        self._summary_scope = str(config.get("summary_scope", "all") or "all").strip()
-        if self._summary_scope not in {"all", "unfinished", "completed"}:
-            self._summary_scope = "all"
-            logger.warning("#订阅助手# 无效的订阅汇总范围，已回退为全部 [SUMMARY_SCOPE_INVALID]")
+        self._summary_scopes = normalize_summary_scopes(
+            config.get("summary_scopes", config.get("summary_scope", ["all"]))
+        )
         self._summary_cron = str(config.get("summary_cron", "0 9 * * *") or "").strip()
         self._summary_max_items = min(
             max(_integer(config.get("summary_max_items", 80), 80), 1), 200
@@ -196,16 +229,6 @@ class VarietySubscribeAssistant(_PluginBase):
                 self._summary_enabled = False
                 logger.error("#订阅助手# 每日订阅汇总Cron无效，汇总任务未启动 [CRON_INVALID]")
 
-        self._calendar = _DramaCalendar()
-        calendar_config = self._calendar_config(config)
-        try:
-            self._calendar.init_plugin(calendar_config)
-        except Exception as exc:
-            self._calendar_enabled = False
-            logger.error(
-                f"#订阅助手# 追剧排期模块初始化失败 [{type(exc).__name__.upper()}]"
-            )
-
         if not self._enabled:
             return
         logger.info(
@@ -216,75 +239,15 @@ class VarietySubscribeAssistant(_PluginBase):
         )
         self._handle_run_once(config)
 
-    def _with_legacy_calendar_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        if any(key.startswith("calendar_") for key in config):
-            return config
-        try:
-            legacy = self.get_config("DramaCalendar") or {}
-        except Exception:
-            legacy = {}
-        if not isinstance(legacy, dict) or not legacy:
-            return config
-        changed = False
-        if "calendar_enabled" not in config:
-            config["calendar_enabled"] = bool(legacy.get("enabled", False))
-            changed = True
-        for old_key, new_key in self._CALENDAR_KEYS.items():
-            if old_key in legacy and new_key not in config:
-                config[new_key] = legacy[old_key]
-                changed = True
-        if changed:
-            try:
-                self.update_config(config)
-            except Exception:
-                logger.warning("#订阅助手# 原追剧更新配置已读取，但持久化迁移失败 [MIGRATION_SAVE_FAILED]")
-            logger.info("#订阅助手# 已读取原追剧更新日历配置")
-        return config
-
-    def _calendar_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        payload = {
-            "enabled": self._enabled and self._calendar_enabled,
-            "run_once": False,
-        }
-        defaults = {
-            "notify_enabled": True,
-            "notification_scope": "all",
-            "use_mp_config": True,
-            "media_server": "",
-            "emby_url": "",
-            "emby_api_key": "",
-            "emby_user_id": "",
-            "tmdb_token": "",
-            "cron": "0 8 * * *",
-            "timezone": "Asia/Shanghai",
-            "calendar_days": 7,
-            "tmdb_requests_per_second": 3,
-            "tmdb_max_retries": 5,
-            "cache_ttl_hours": 24,
-            "verify_https": True,
-        }
-        for child_key, parent_key in self._CALENDAR_KEYS.items():
-            payload[child_key] = config.get(parent_key, defaults[child_key])
-        return payload
-
     def _handle_run_once(self, config: Dict[str, Any]) -> None:
-        calendar_once = bool(config.get("calendar_run_once", False))
         summary_once = bool(config.get("summary_run_once", False))
-        if calendar_once or summary_once:
+        if summary_once:
             updated = dict(config)
-            updated["calendar_run_once"] = False
             updated["summary_run_once"] = False
             try:
                 self.update_config(updated)
             except Exception:
                 logger.warning("#订阅助手# 一次性运行开关复位失败 [CONFIG_RESET_FAILED]")
-        if calendar_once and self._calendar_enabled and self._calendar:
-            threading.Thread(
-                target=self._calendar.generate_calendar,
-                kwargs={"source": "立即运行"},
-                name="subscribe-assistant-calendar",
-                daemon=True,
-            ).start()
         if summary_once:
             threading.Thread(
                 target=self.send_subscription_summary,
@@ -440,17 +403,16 @@ class VarietySubscribeAssistant(_PluginBase):
             if db is None:
                 raise RuntimeError("SUBSCRIBE_DB_UNAVAILABLE")
             result: List[Any] = []
-            for media_type in ("电视剧", "电影"):
-                for page in range(1, 6):
-                    batch = SubscribeHistory.list_by_type(
-                        db, mtype=media_type, page=page, count=200
-                    ) or []
-                    result.extend(item for item in batch if self._is_today(item, now))
-                    if len(batch) < 200:
-                        break
-                    oldest = str(getattr(batch[-1], "date", "") or "")
-                    if oldest and oldest[:10] < now.strftime("%Y-%m-%d"):
-                        break
+            for page in range(1, 6):
+                batch = SubscribeHistory.list_by_type(
+                    db, mtype="电视剧", page=page, count=200
+                ) or []
+                result.extend(item for item in batch if self._is_today(item, now))
+                if len(batch) < 200:
+                    break
+                oldest = str(getattr(batch[-1], "date", "") or "")
+                if oldest and oldest[:10] < now.strftime("%Y-%m-%d"):
+                    break
             return result
         except Exception as exc:
             logger.warning(
@@ -466,25 +428,28 @@ class VarietySubscribeAssistant(_PluginBase):
             return
         try:
             now = datetime.now()
-            unfinished = SubscribeOper().list() or []
+            active = [
+                item for item in (SubscribeOper().list() or [])
+                if _record_type(item) == "电视剧"
+            ]
             completed = self._completed_today(now)
             message = format_subscription_summary(
                 now,
-                unfinished,
+                active,
                 completed,
-                self._summary_scope,
+                self._summary_scopes,
                 self._summary_max_items,
             )
             self.post_message(
                 mtype=NotificationType.Plugin,
-                title="每日订阅汇总",
+                title="电视剧更新",
                 text=message,
                 username=settings.SUPERUSER,
             )
             logger.info(
                 f"#订阅助手# 每日订阅汇总已提交 | 来源={self._safe_name(source)} | "
-                f"未完成={len(unfinished)} | 今日完成={len(completed)} | "
-                f"范围={self._summary_scope}"
+                f"活动订阅={len(active)} | 今日完成={len(completed)} | "
+                f"范围={','.join(self._summary_scopes)}"
             )
         except Exception as exc:
             logger.error(
@@ -500,15 +465,6 @@ class VarietySubscribeAssistant(_PluginBase):
         if not self._enabled:
             return []
         services: List[dict] = []
-        if self._calendar_enabled and self._calendar:
-            try:
-                for service in self._calendar.get_service() or []:
-                    item = dict(service)
-                    item["id"] = "VarietySubscribeAssistant_calendar"
-                    item["name"] = f"订阅助手·追剧排期（{self._calendar._cron}）"
-                    services.append(item)
-            except Exception:
-                logger.error("#订阅助手# 追剧排期服务创建失败 [CALENDAR_SERVICE_FAILED]")
         if self._summary_enabled:
             services.append({
                 "id": "VarietySubscribeAssistant_summary",
@@ -548,30 +504,23 @@ class VarietySubscribeAssistant(_PluginBase):
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         rule_items = self._rule_group_items()
-        try:
-            server_items = _DramaCalendar._moviepilot_media_items()
-        except Exception:
-            server_items = []
         content: List[dict] = [{
             "component": "VAlert",
             "props": {
                 "type": "info",
                 "variant": "tonal",
-                "text": "新增订阅规则只作用于插件启用后创建的订阅。追剧排期由原“追剧更新日历”合并而来；每日订阅汇总直接读取MoviePilot订阅和今日完成历史。",
+                "text": "新增订阅规则只作用于插件启用后创建的订阅。电视剧更新汇总直接读取MoviePilot订阅和今日完成历史。",
             },
         }, {
             "component": "VRow",
             "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{
                     "component": "VSwitch", "props": {"model": "enabled", "label": "插件启用"}
                 }]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{
                     "component": "VSwitch", "props": {"model": "rule_enabled", "label": "新增订阅规则"}
                 }]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{
-                    "component": "VSwitch", "props": {"model": "calendar_enabled", "label": "追剧排期通知"}
-                }]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{
                     "component": "VSwitch", "props": {"model": "summary_enabled", "label": "每日订阅汇总"}
                 }]},
             ],
@@ -643,105 +592,7 @@ class VarietySubscribeAssistant(_PluginBase):
             "props": {"class": "my-3"},
         }, {
             "component": "VAlert",
-            "props": {"type": "info", "variant": "tonal", "text": "追剧排期通知"},
-        }, {
-            "component": "VRow",
-            "props": {"show": "{{calendar_enabled}}"},
-            "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{
-                    "component": "VSwitch", "props": {"model": "calendar_notify_enabled", "label": "发送插件通知"}
-                }]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{
-                    "component": "VSwitch", "props": {"model": "calendar_run_once", "label": "立即生成一次"}
-                }]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{
-                    "component": "VSwitch", "props": {"model": "calendar_use_mp_config", "label": "读取MP媒体服务器"}
-                }]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{
-                    "component": "VSwitch", "props": {"model": "calendar_verify_https", "label": "校验HTTPS证书"}
-                }]},
-            ],
-        }, {
-            "component": "VRow",
-            "props": {"show": "{{calendar_enabled}}"},
-            "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{
-                    "component": "VTextField",
-                    "props": {"model": "calendar_cron", "label": "追剧排期 Cron（5段）"},
-                }]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{
-                    "component": "VTextField",
-                    "props": {"model": "calendar_timezone", "label": "时区"},
-                }]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{
-                    "component": "VTextField",
-                    "props": {"model": "calendar_days", "label": "排期天数（1-31）", "type": "number"},
-                }]},
-            ],
-        }, {
-            "component": "VRow",
-            "props": {"show": "{{calendar_enabled}}"},
-            "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{
-                    "component": "VSelect",
-                    "props": {
-                        "model": "calendar_notification_scope",
-                        "label": "排期通知范围",
-                        "items": [
-                            {"title": "全部排期", "value": "all"},
-                            {"title": "仅已入库", "value": "in_library"},
-                            {"title": "仅未入库", "value": "missing"},
-                        ],
-                        "clearable": False,
-                    },
-                }]},
-                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{
-                    "component": "VSelect",
-                    "props": {
-                        "model": "calendar_media_server",
-                        "label": "MoviePilot媒体服务器",
-                        "items": server_items,
-                        "clearable": True,
-                    },
-                }]},
-            ],
-        }, {
-            "component": "VRow",
-            "props": {"show": "{{calendar_enabled && !calendar_use_mp_config}}"},
-            "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{
-                    "component": "VTextField",
-                    "props": {"model": "calendar_emby_url", "label": "Emby/Jellyfin地址"},
-                }]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{
-                    "component": "VTextField",
-                    "props": {"model": "calendar_emby_api_key", "label": "API Key", "type": "password"},
-                }]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{
-                    "component": "VTextField",
-                    "props": {"model": "calendar_emby_user_id", "label": "用户ID（可留空）", "clearable": True},
-                }]},
-            ],
-        }, {
-            "component": "VRow",
-            "props": {"show": "{{calendar_enabled}}"},
-            "content": [
-                {"component": "VCol", "props": {"cols": 12}, "content": [{
-                    "component": "VTextField",
-                    "props": {
-                        "model": "calendar_tmdb_token",
-                        "label": "TMDB Key/Read Token（留空使用MoviePilot内置值）",
-                        "type": "password",
-                        "clearable": True,
-                    },
-                }]},
-            ],
-        }, {
-            "component": "VDivider",
-            "props": {"class": "my-3"},
-        }, {
-            "component": "VAlert",
-            "props": {"type": "warning", "variant": "tonal", "text": "每日订阅状态汇总"},
+            "props": {"type": "warning", "variant": "tonal", "text": "电视剧更新汇总"},
         }, {
             "component": "VRow",
             "props": {"show": "{{summary_enabled}}"},
@@ -756,14 +607,16 @@ class VarietySubscribeAssistant(_PluginBase):
                 {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{
                     "component": "VSelect",
                     "props": {
-                        "model": "summary_scope",
+                        "model": "summary_scopes",
                         "label": "订阅通知范围",
                         "items": [
-                            {"title": "全部订阅", "value": "all"},
-                            {"title": "仅未完成订阅", "value": "unfinished"},
-                            {"title": "仅今日已完成", "value": "completed"},
+                            {"title": "全部", "value": "all"},
+                            {"title": "未更新", "value": "not_updated"},
+                            {"title": "已更新", "value": "updated"},
                         ],
-                        "clearable": False,
+                        "multiple": True,
+                        "chips": True,
+                        "clearable": True,
                     },
                 }]},
                 {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{
@@ -780,26 +633,9 @@ class VarietySubscribeAssistant(_PluginBase):
             "include": "正片",
             "exclude": "",
             "filter_groups": ["日常观影"],
-            "calendar_enabled": False,
-            "calendar_notify_enabled": True,
-            "calendar_run_once": False,
-            "calendar_notification_scope": "all",
-            "calendar_use_mp_config": True,
-            "calendar_media_server": "",
-            "calendar_emby_url": "",
-            "calendar_emby_api_key": "",
-            "calendar_emby_user_id": "",
-            "calendar_tmdb_token": "",
-            "calendar_cron": "0 8 * * *",
-            "calendar_timezone": "Asia/Shanghai",
-            "calendar_days": 7,
-            "calendar_tmdb_requests_per_second": 3,
-            "calendar_tmdb_max_retries": 5,
-            "calendar_cache_ttl_hours": 24,
-            "calendar_verify_https": True,
             "summary_enabled": False,
             "summary_run_once": False,
-            "summary_scope": "all",
+            "summary_scopes": ["all"],
             "summary_cron": "0 9 * * *",
             "summary_max_items": 80,
         }
@@ -811,15 +647,8 @@ class VarietySubscribeAssistant(_PluginBase):
         return None
 
     def get_page(self) -> List[dict]:
-        calendar_page = self._calendar.get_page() if self._calendar else []
-        return calendar_page or []
+        return []
 
     def stop_service(self):
-        if self._calendar:
-            try:
-                self._calendar.stop_service()
-            except Exception:
-                pass
-        self._calendar = None
         self._enabled = False
 
