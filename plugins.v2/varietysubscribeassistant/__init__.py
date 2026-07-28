@@ -86,10 +86,9 @@ def _record_line(record: Any) -> str:
 
 def _is_updated_today(record: Any, now: datetime) -> bool:
     today = now.strftime("%Y-%m-%d")
-    for field in ("last_update", "date"):
-        if str(getattr(record, field, "") or "").strip().startswith(today):
-            return True
-    return False
+    if hasattr(record, "lack_episode"):
+        return str(getattr(record, "last_update", "") or "").strip().startswith(today)
+    return str(getattr(record, "date", "") or "").strip().startswith(today)
 
 
 def normalize_summary_scopes(value: Any) -> List[str]:
