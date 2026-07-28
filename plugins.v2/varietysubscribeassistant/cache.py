@@ -1,3 +1,5 @@
+"""订阅助手追剧排期所需的本地缓存。"""
+
 from __future__ import annotations
 
 import json
@@ -73,3 +75,4 @@ class ShowCache:
     def close(self) -> None:
         """关闭SQLite连接。"""
         self._connection.close()
+

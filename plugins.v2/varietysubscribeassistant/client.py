@@ -1,3 +1,5 @@
+"""订阅助手追剧排期所需的媒体服务器与 TMDB 客户端。"""
+
 from __future__ import annotations
 
 import time
@@ -243,3 +245,4 @@ class TmdbClient:
     def close(self) -> None:
         """关闭TMDB HTTP会话。"""
         self._session.close()
+

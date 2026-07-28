@@ -17,6 +17,7 @@ class _PluginBase:
     def __init__(self):
         self._test_data = {}
         self._test_messages = []
+        self._test_configs = {}
 
     def get_data(self, key):
         return self._test_data.get(key)
@@ -26,6 +27,20 @@ class _PluginBase:
 
     def post_message(self, **kwargs):
         self._test_messages.append(kwargs)
+
+    def get_config(self, plugin_id=None):
+        return self._test_configs.get(plugin_id or self.__class__.__name__)
+
+    def update_config(self, config, plugin_id=None):
+        self._test_configs[plugin_id or self.__class__.__name__] = dict(config)
+        return True
+
+    def get_data_path(self, plugin_id=None):
+        path = Path(os.getenv("TEMP", ".")) / "moviepilot-plugin-tests" / (
+            plugin_id or self.__class__.__name__
+        )
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
 
 class _CronTrigger:
@@ -53,11 +68,34 @@ def _install_stubs():
     app_plugins._PluginBase = _PluginBase
     app_schemas = types.ModuleType("app.schemas")
     app_schema_types = types.ModuleType("app.schemas.types")
+    app_core_event = types.ModuleType("app.core.event")
+    app_db = types.ModuleType("app.db")
+    app_db_subscribe = types.ModuleType("app.db.subscribe_oper")
+
+    class _EventManager:
+        @staticmethod
+        def register(*_args, **_kwargs):
+            return lambda function: function
+
+    class _EventType:
+        SubscribeAdded = "subscribe.added"
+
+    class _SubscribeOper:
+        def list(self):
+            return []
+
+        def get(self, _sid):
+            return None
+
+    app_core_event.Event = object
+    app_core_event.eventmanager = _EventManager()
+    app_db_subscribe.SubscribeOper = _SubscribeOper
 
     class _NotificationType:
         Plugin = "plugin"
 
     app_schema_types.NotificationType = _NotificationType
+    app_schema_types.EventType = _EventType
     p115 = types.ModuleType("p115client")
     p115.P115Client = object
     asynctools = types.ModuleType("asynctools")
@@ -73,6 +111,8 @@ def _install_stubs():
     interval.IntervalTrigger = _IntervalTrigger
     sys.modules.update({
         "app": app, "app.core": app_core, "app.core.config": app_core_config,
+        "app.core.event": app_core_event, "app.db": app_db,
+        "app.db.subscribe_oper": app_db_subscribe,
         "app.log": app_log, "app.plugins": app_plugins,
         "app.schemas": app_schemas, "app.schemas.types": app_schema_types,
         "p115client": p115, "asynctools": asynctools, "apscheduler": apscheduler,
@@ -623,3 +663,4 @@ def test_asynctools_021_is_rejected_even_when_exports_exist():
         assert str(exc) == "python-asynctools>=0.2.2 is required"
     else:
         raise AssertionError("incompatible python-asynctools 0.2.1 was accepted")
+
