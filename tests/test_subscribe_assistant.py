@@ -168,7 +168,7 @@ def test_plugin_is_visible_without_site_authentication():
     assert SubscribeLinkRenamer.plugin_version == "0.3.1"
     assert SubscribeLinkRenamer.auth_level == 1
     assert VarietySubscribeAssistant.plugin_name == "订阅助手"
-    assert VarietySubscribeAssistant.plugin_version == "0.3.0"
+    assert VarietySubscribeAssistant.plugin_version == "0.3.1"
     assert VarietySubscribeAssistant.plugin_config_prefix == "varietysubscribeassistant_"
     assert VarietySubscribeAssistant.auth_level == 1
 
@@ -206,6 +206,12 @@ def _subscription(sid, words, **kwargs):
         "year": "",
         "date": "",
         "last_update": "",
+        "tmdbid": sid,
+        "doubanid": "",
+        "bangumiid": None,
+        "anilistid": None,
+        "media_source": "tmdb",
+        "media_id": str(sid),
     }
     values.update(kwargs)
     record = types.SimpleNamespace(**values)
@@ -311,7 +317,7 @@ def test_subscription_summary_formats_active_and_today_completed():
     active = [
         _subscription(
             31, "", name="依然的喜事", year="2026", season=1,
-            total_episode=20, lack_episode=0, note=[19, 20],
+            total_episode=20, lack_episode=0, note=list(range(1, 21)),
             last_update="2026-07-28 08:30:00",
         ),
         _subscription(
@@ -328,8 +334,32 @@ def test_subscription_summary_formats_active_and_today_completed():
             date="2026-07-28 08:00:00", _history=True,
         ),
     ]
+    downloads = [
+        types.SimpleNamespace(
+            type="电视剧", title="依然的喜事", year="2026",
+            tmdbid=31, media_source="tmdb", media_id="31",
+            seasons="S01", episodes="E19-E20",
+            torrent_name="", date="2026-07-28 07:30:00",
+        ),
+        types.SimpleNamespace(
+            type="电视剧", title="与你相恋到生命尽头", year="2026",
+            tmdbid=33, media_source="tmdb", media_id="33",
+            seasons="S01", episodes="E04",
+            torrent_name="", date="2026-07-28 08:00:00",
+        ),
+        types.SimpleNamespace(
+            type="电视剧", title="非订阅剧", year="2026",
+            tmdbid=99, media_source="tmdb", media_id="99",
+            seasons="S01", episodes="E01-E10",
+            torrent_name="", date="2026-07-28 08:00:00",
+        ),
+    ]
     message = format_subscription_summary(
-        datetime(2026, 7, 28, 9, 0), active, completed, ["updated"]
+        datetime(2026, 7, 28, 9, 0),
+        active,
+        completed,
+        downloads,
+        ["updated"],
     )
     assert message == "\n".join([
         "**电视剧更新**",
@@ -383,15 +413,17 @@ def test_summary_cron_service_and_immediate_notification_use_mp_channel():
         )
     ]
     plugin._completed_today = lambda _now: []
+    plugin._downloads_today = lambda _now: []
     services = plugin.get_service()
     assert len(services) == 1
     assert services[0]["id"] == "VarietySubscribeAssistant_summary"
     plugin.send_subscription_summary(source="测试")
     assert len(plugin._test_messages) == 1
     message = plugin._test_messages[0]
-    assert message["title"] == "电视剧更新"
+    assert message["title"] == "订阅汇总"
     assert "**电视剧未更新**" in message["text"]
-    assert "📺︎汇总测试剧 (2026) S02E09" in message["text"]
+    assert "📺︎汇总测试剧 (2026) S02" in message["text"]
+    assert "E09" not in message["text"]
 
 
 def test_subscription_words_rename_unique_match_and_keep_original_without_match():
