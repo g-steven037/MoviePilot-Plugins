@@ -403,12 +403,13 @@ def test_scheduled_empty_cleanup_never_deletes_roots_or_nonempty_dirs(tmp_path: 
         plugin.cleanup_empty_directories()
         assert empty_leaf.exists()
         assert second_empty_leaf.exists()
-        assert plugin.get_data("empty_cleanup_pending") is None
+        assert plugin.get_data("empty_cleanup_pending") is True
     finally:
         plugin._operation_lock.release()
 
     plugin.save_data("retry_state", {"existing-task": {"attempts": 2, "exhausted": False}})
     plugin.cleanup_empty_directories()
+    assert plugin.get_data("empty_cleanup_pending") is False
     assert plugin.get_data("retry_state")["existing-task"]["attempts"] == 2
     assert root.exists()
     assert second_root.exists()
@@ -663,4 +664,128 @@ def test_asynctools_021_is_rejected_even_when_exports_exist():
         assert str(exc) == "python-asynctools>=0.2.2 is required"
     else:
         raise AssertionError("incompatible python-asynctools 0.2.1 was accepted")
+
+
+def test_selected_exhausted_retry_only_processes_explicit_files(tmp_path: Path):
+    _install_stubs()
+    plugin_root = Path(__file__).parents[1] / "plugins.v2"
+    sys.path.insert(0, str(plugin_root))
+    from p115rapidretry import P115RapidRetry
+
+    retry = tmp_path / "retry"
+    retry.mkdir()
+    selected = retry / "selected.mkv"
+    skipped = retry / "skipped.mkv"
+    selected.write_bytes(b"selected")
+    skipped.write_bytes(b"skipped")
+
+    plugin = P115RapidRetry()
+    plugin._enabled = True
+    plugin._client = object()
+    plugin._retry_dir = retry.resolve()
+    plugin._max_batch = 10
+    plugin._operation_lock = threading.Lock()
+    selected_id = plugin._task_id(selected, retry)
+    skipped_id = plugin._task_id(skipped, retry)
+    plugin.save_data("retry_state", {
+        selected_id: {"attempts": 10, "code": "RAPID_MISS", "exhausted": True},
+        skipped_id: {"attempts": 10, "code": "RAPID_MISS", "exhausted": True},
+    })
+    handled = []
+    plugin._handle = lambda path, root, identity, from_retry: handled.append(path)
+
+    plugin.retry_selected_exhausted({selected_id})
+
+    assert handled == [selected]
+    assert plugin.get_data("retry_state")[selected_id]["exhausted"] is True
+
+
+def test_success_cleanup_removes_empty_descendants_and_parent(tmp_path: Path):
+    _install_stubs()
+    plugin_root = Path(__file__).parents[1] / "plugins.v2"
+    sys.path.insert(0, str(plugin_root))
+    from p115rapidretry import P115RapidRetry
+
+    watch = tmp_path / "watch"
+    retry = tmp_path / "retry"
+    pt = tmp_path / "pt"
+    series = watch / "series"
+    empty_child = series / "leftover-empty-child"
+    for directory in (watch, retry, pt, empty_child):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    plugin = P115RapidRetry()
+    plugin._watch_dir = watch.resolve()
+    plugin._retry_dir = retry.resolve()
+    plugin._protected_pt_dir = pt.resolve()
+    plugin._empty_cleanup_roots = []
+    plugin._detailed_logs = False
+
+    plugin._remove_empty_parent_dirs(series, watch)
+
+    assert not empty_child.exists()
+    assert not series.exists()
+    assert watch.exists()
+    assert retry.exists()
+    assert pt.exists()
+
+
+def test_scheduled_cleanup_is_deferred_until_operation_lock_is_released(tmp_path: Path):
+    _install_stubs()
+    plugin_root = Path(__file__).parents[1] / "plugins.v2"
+    sys.path.insert(0, str(plugin_root))
+    from p115rapidretry import P115RapidRetry
+
+    root = tmp_path / "cleanup-root"
+    child = root / "empty-child"
+    child.mkdir(parents=True)
+    root_stat = root.stat()
+
+    plugin = P115RapidRetry()
+    plugin._enabled = True
+    plugin._empty_cleanup_enabled = True
+    plugin._empty_cleanup_roots = [root.resolve()]
+    plugin._empty_cleanup_identities = {
+        root.resolve(): (root_stat.st_dev, root_stat.st_ino)
+    }
+    plugin._watch_dir = (tmp_path / "watch").resolve()
+    plugin._retry_dir = (tmp_path / "retry").resolve()
+    plugin._protected_pt_dir = (tmp_path / "pt").resolve()
+    plugin._operation_lock = threading.Lock()
+    plugin._empty_cleanup_pending = threading.Event()
+
+    plugin._operation_lock.acquire()
+    try:
+        plugin.cleanup_empty_directories()
+        assert plugin._empty_cleanup_pending.is_set()
+        assert plugin.get_data("empty_cleanup_pending") is True
+        assert child.exists()
+    finally:
+        plugin._operation_lock.release()
+
+    plugin.cleanup_empty_directories(deferred=True)
+    assert not plugin._empty_cleanup_pending.is_set()
+    assert plugin.get_data("empty_cleanup_pending") is False
+    assert not child.exists()
+    assert root.exists()
+
+
+def test_old_worker_uses_generation_local_stop_event():
+    _install_stubs()
+    plugin_root = Path(__file__).parents[1] / "plugins.v2"
+    sys.path.insert(0, str(plugin_root))
+    from p115rapidretry import P115RapidRetry
+
+    plugin = P115RapidRetry()
+    old_stop = threading.Event()
+    old_stop.set()
+    old_events = queue.Queue()
+    plugin._stop_event = threading.Event()
+    plugin._events = queue.Queue()
+
+    worker = threading.Thread(target=plugin._worker_loop, args=(old_stop, old_events))
+    worker.start()
+    worker.join(timeout=1)
+
+    assert not worker.is_alive()
 
