@@ -64,7 +64,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "（仅自用）监控目录，秒传失败时转移到临时目录，定时重试，秒传成功后删除本地文件，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "1.0.9"
+    plugin_version = "1.1.1"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
@@ -107,12 +107,22 @@ class P115RapidRetry(_PluginBase):
     _consecutive_failures = 0
     _risk_notices: set[str] = set()
     _sha1_cache: Dict[FileIdentity, str] = {}
+    _manual_retry_ids: set[str] = set()
+    _empty_cleanup_pending = threading.Event()
 
     def init_plugin(self, config: dict = None):
         self.stop_service()
         config = config or {}
         run_rapid_once = bool(config.get("run_rapid_once", False))
         run_retry_once = bool(config.get("run_retry_once", False))
+        run_selected_retry_once = bool(config.get("run_selected_retry_once", False))
+        selected_retry_ids = config.get("manual_retry_files") or []
+        if not isinstance(selected_retry_ids, list):
+            selected_retry_ids = []
+        self._manual_retry_ids = {
+            value for value in selected_retry_ids[:100]
+            if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{16}", value)
+        }
         self._enabled = bool(config.get("enabled", False))
         self._client = None
         self._auth_blocked = False
@@ -167,12 +177,18 @@ class P115RapidRetry(_PluginBase):
             self._load_risk_control(cookie)
             self._client = self._create_client(cookie)
             del cookie
-            if run_rapid_once or run_retry_once:
+            if run_rapid_once or run_retry_once or run_selected_retry_once:
                 config = dict(config)
                 config["run_rapid_once"] = False
                 config["run_retry_once"] = False
+                config["run_selected_retry_once"] = False
+                config["manual_retry_files"] = []
                 self.update_config(config)
             self._start_realtime_monitor(queue_existing=False)
+            if self._empty_cleanup_enabled and bool(self.get_data("empty_cleanup_pending")):
+                self._empty_cleanup_pending.set()
+            if run_selected_retry_once:
+                self._put_control_event("retry_selected")
             if run_retry_once:
                 self._put_control_event("retry_now")
             if run_rapid_once:
@@ -427,451 +443,7 @@ class P115RapidRetry(_PluginBase):
         value = path.lstat()
         attributes = getattr(value, "st_file_attributes", 0)
         reparse_marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-        if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode) or bool(attributes & reparse_marker):
-            raise ValueError("DIRECTORY_LINK_UNSAFE")
-        return value
-
-    @staticmethod
-    def _safe_code(exc: Exception) -> str:
-        text = str(exc)
-        if text and text.isupper() and " " not in text and len(text) <= 64:
-            return text
-        return type(exc).__name__.upper()[:64]
-
-    def get_state(self) -> bool:
-        return self._enabled
-
-    def get_service(self) -> Optional[List[Dict[str, Any]]]:
-        if not self._enabled:
-            return None
-        services = [{
-            "id": "P115RapidRetry_retry",
-            "name": "115秒传临时目录限速重试",
-            "trigger": CronTrigger.from_crontab(self._cron),
-            "func": self.retry_pending,
-            "kwargs": {},
-        }]
-        if self._empty_cleanup_enabled:
-            services.append({
-                "id": "P115RapidRetry_empty_cleanup",
-                "name": "115秒传定时清理空文件夹",
-                "trigger": CronTrigger.from_crontab(self._empty_cleanup_cron),
-                "func": self.cleanup_empty_directories,
-                "kwargs": {},
-            })
-        return services
-
-    def _start_realtime_monitor(self, queue_existing: bool = True):
-        self._stop_event = threading.Event()
-        self._events = queue.Queue(maxsize=1024)
-        self._overflow = False
-        self._worker = threading.Thread(target=self._worker_loop, name="p115-rapid-worker", daemon=True)
-        self._worker.start()
-        observer = Observer()
-        observer.schedule(_WatchHandler(self), str(self._watch_dir), recursive=True)
-        observer.start()
-        self._observer = observer
-        logger.info("115秒传重试：安全实时监控已启动")
-        if queue_existing:
-            self._queue_existing_files()
-
-    def _put_event(self, action: str, path: Path):
-        if not self._enabled:
-            return False
-        try:
-            self._events.put_nowait((action, str(path)))
-            return True
-        except queue.Full:
-            self._overflow = True
-            return False
-
-    def _put_control_event(self, action: str) -> bool:
-        if action not in {"scan_now", "retry_now"}:
-            return False
-        queued = self._put_event(action, Path())
-        if not queued:
-            logger.warning(f"#115秒传# 立即任务提交失败 | 任务={action} | 代码=QUEUE_OVERFLOW")
-        return queued
-
-    def queue_watch_file(self, path: Path):
-        if ".p115-delete-" in path.name:
-            return False
-        return self._put_event("upsert", path)
-
-    def cancel_watch_file(self, path: Path):
-        self._put_event("cancel", path)
-
-    def _queue_existing_files(self, manual: bool = False) -> int:
-        discovered = 0
-        queued = 0
-        try:
-            for path in self._watch_dir.rglob("*"):
-                if path.is_file():
-                    discovered += 1
-                    if self.queue_watch_file(path):
-                        queued += 1
-        except OSError:
-            self._record("QUEUE_SCAN", False, "QUEUE_OVERFLOW")
-        if manual:
-            logger.info(
-                f"#115秒传# 立即运行秒传扫描完成 | 发现文件={discovered} | 已提交={queued}"
-            )
-        return queued
-
-    def _worker_loop(self):
-        pending: Dict[str, float] = {}
-        while not self._stop_event.is_set():
-            try:
-                action, raw_path = self._events.get(timeout=0.5)
-                if action == "stop":
-                    break
-                if action == "scan_now":
-                    logger.info("#115秒传# 开始立即运行秒传")
-                    self._queue_existing_files(manual=True)
-                elif action == "retry_now":
-                    self.retry_pending(manual=True)
-                elif action == "cancel":
-                    pending.pop(raw_path, None)
-                elif len(pending) < 4096:
-                    pending[raw_path] = monotonic() + self._stable_seconds
-                else:
-                    self._overflow = True
-            except queue.Empty:
-                pass
-
-            now = monotonic()
-            due = [raw for raw, deadline in pending.items() if deadline <= now]
-            for raw in due[:1]:
-                pending.pop(raw, None)
-                self._process_watch_file(Path(raw))
-
-            if self._overflow and self._events.empty() and len(pending) < 2048:
-                self._overflow = False
-                self._record("QUEUE_OVERFLOW", False, "QUEUE_OVERFLOW")
-                self._queue_existing_files()
-
-    def _process_watch_file(self, path: Path):
-        if not self._enabled or not self._client:
-            return
-        try:
-            identity = secure_identity(path, self._watch_dir, require_hardlink=True)
-            if time() - path.stat().st_mtime < self._stable_seconds:
-                self.queue_watch_file(path)
-                return
-        except (OSError, ValueError) as exc:
-            self._record(self._task_id(path, self._watch_dir), False, self._safe_code(exc))
-            return
-        with self._operation_lock:
-            self._handle(path, self._watch_dir, identity, from_retry=False)
-
-    def retry_pending(self, manual: bool = False):
-        if not self._enabled or not self._client or self._auth_blocked or time() < self._circuit_until:
-            if manual:
-                logger.warning("#115秒传# 立即重试未执行 | 代码=CIRCUIT_OPEN")
-            return
-        if not self._operation_lock.acquire(blocking=False):
-            if manual:
-                logger.warning("#115秒传# 立即重试未执行 | 代码=OPERATION_BUSY")
-            return
-        try:
-            if manual:
-                logger.info("#115秒传# 开始立即重试秒传")
-            state = self.get_data("retry_state") or {}
-            files = self._secure_files(self._retry_dir)
-            active_ids = {self._task_id(path, self._retry_dir) for path in files}
-            pruned = {key: value for key, value in state.items() if key in active_ids}
-            if pruned != state:
-                self.save_data("retry_state", pruned)
-            state = pruned
-            eligible = [
-                path for path in files
-                if not bool(state.get(self._task_id(path, self._retry_dir), {}).get("exhausted", False))
-            ]
-            exhausted_cleanup = [
-                path for path in files
-                if self._delete_exhausted_enabled
-                and bool(state.get(self._task_id(path, self._retry_dir), {}).get("exhausted", False))
-            ]
-            if self._detailed_logs:
-                submitted = min(len(eligible) + len(exhausted_cleanup), self._max_batch)
-                logger.info(
-                    f"#115秒传# 临时目录扫描完成，共发现 {len(files)} 个文件，本轮提交 {submitted} 个任务"
-                    f"（可重试={len(eligible)}，耗尽清理={len(exhausted_cleanup)}）"
-                )
-            processed = 0
-            for path in files:
-                task_id = self._task_id(path, self._retry_dir)
-                task_state = state.get(task_id, {})
-                if bool(task_state.get("exhausted", False)):
-                    if self._delete_exhausted_enabled:
-                        self._delete_previously_exhausted(path, task_id, task_state)
-                        processed += 1
-                        if processed >= self._max_batch:
-                            break
-                    continue
-                self._handle(path, self._retry_dir, None, from_retry=True)
-                processed += 1
-                if processed >= self._max_batch or self._auth_blocked or time() < self._circuit_until:
-                    break
-            if manual:
-                logger.info(f"#115秒传# 立即重试秒传完成 | 本轮处理={processed}")
-        finally:
-            self._operation_lock.release()
-
-    def _delete_previously_exhausted(self, path: Path, task_id: str, task_state: Dict[str, Any]) -> bool:
-        filename = self._safe_log_value(path.name)
-        attempts = min(max(int(task_state.get("attempts", self._max_retries)), 0), 1000)
-        code = self._normalize_code(str(task_state.get("code", "RAPID_MISS")))
-        try:
-            identity = secure_identity(path, self._retry_dir, require_hardlink=False)
-        except (OSError, ValueError):
-            logger.warning(
-                f"#115秒传# [简短] 重试耗尽清理=安全校验失败 | 文件={filename} | "
-                f"重试次数={attempts}/{self._max_retries}"
-            )
-            return False
-        if not self._verified_unlink(path, identity, self._retry_dir):
-            logger.warning(
-                f"#115秒传# [简短] 重试耗尽清理=删除失败 | 文件={filename} | "
-                f"重试次数={attempts}/{self._max_retries}"
-            )
-            return False
-        self._clear_retry_state(task_id)
-        self._sha1_cache.pop(identity, None)
-        if self._detailed_logs:
-            logger.warning(f"#115秒传# 已安全删除此前重试耗尽的失败文件: {filename}")
-        else:
-            logger.warning(
-                f"#115秒传# [简短] 重试耗尽清理=已删除 | 文件={filename} | "
-                f"重试次数={attempts}/{self._max_retries}"
-            )
-        self._remove_empty_parent_dirs(path.parent, self._retry_dir)
-        self._send_bot_exhausted(path, attempts, code, deleted=True, delete_requested=True)
-        return True
-
-    @staticmethod
-    def _secure_files(root: Path):
-        found = []
-        try:
-            for path in root.rglob("*"):
-                try:
-                    secure_identity(path, root, require_hardlink=False)
-                    found.append(path)
-                except (OSError, ValueError):
-                    continue
-        except OSError:
-            return []
-        return sorted(found)
-
-    def _handle(self, path: Path, root: Path, identity: FileIdentity | None, from_retry: bool):
-        task_id = self._task_id(path, root)
-        source = "重试" if from_retry else "后台线程"
-        filename = self._safe_log_value(path.name)
-        retry_state = (self.get_data("retry_state") or {}).get(task_id, {})
-        attempt_no = int(retry_state.get("attempts", 0)) + 1 if from_retry else 0
-        if self._detailed_logs:
-            logger.info(f"#115秒传# [{source}-{threading.current_thread().name}] {'重试秒传' if from_retry else '开始秒传'}: {filename}")
-        if self._auth_blocked or time() < self._circuit_until:
-            result = RapidResult(False, True, "CIRCUIT_OPEN", identity)
-        else:
-            cache_identity = identity
-            if cache_identity is None:
-                try:
-                    cache_identity = secure_identity(path, root, require_hardlink=False)
-                except (OSError, ValueError):
-                    cache_identity = None
-            known_sha1 = self._sha1_cache.get(cache_identity) if cache_identity else None
-
-            def progress(event: str):
-                if not self._detailed_logs:
-                    return
-                if event == "SHA1_START":
-                    logger.info(f"#115秒传# 开始计算SHA1: {filename}")
-                elif event == "SHA1_DONE":
-                    logger.info(f"#115秒传# SHA1计算完成: {filename}")
-                elif event == "SHA1_CACHE":
-                    logger.info(f"#115秒传# 从缓存加载SHA1: {filename}")
-
-            result = try_rapid_upload(
-                self._client, path, self._target_pid, root=root,
-                require_hardlink=not from_retry,
-                known_sha1=known_sha1,
-                progress=progress,
-                request_guard=self._acquire_request_slot,
-            )
-        identity = result.identity or identity
-        if identity and result.sha1:
-            if len(self._sha1_cache) >= 4096 and identity not in self._sha1_cache:
-                self._sha1_cache.clear()
-            self._sha1_cache[identity] = result.sha1
-        self._record(task_id, result.success, result.code)
-        self._audit_rapid(path, root, result, from_retry, attempt_no)
-
-        self._apply_risk_result(result)
-
-        if result.success:
-            if identity and self._verified_unlink(path, identity, root):
-                self._clear_retry_state(task_id)
-                self._sha1_cache.pop(identity, None)
-                if from_retry:
-                    if self._detailed_logs:
-                        logger.info(f"#115秒传# 重试秒传成功后删除源文件: {filename}")
-                        logger.info(f"#115秒传# [重试-{threading.current_thread().name}] 重试成功: {filename}")
-                else:
-                    if self._detailed_logs:
-                        logger.info(f"#115秒传# 秒传成功后删除硬链接文件: {filename}")
-                self._send_bot_success(
-                    path, from_retry, cleanup_success=True, retry_attempts=attempt_no
-                )
-                self._remove_empty_parent_dirs(path.parent, root)
-            else:
-                self._record(task_id, False, "FILE_CHANGED")
-                logger.warning(
-                    f"#115秒传# {'秒传成功但本地文件身份变化，未删除' if self._detailed_logs else '[简短] 本地清理失败'}: {filename}"
-                )
-                self._send_bot_success(
-                    path, from_retry, cleanup_success=False, retry_attempts=attempt_no
-                )
-            return
-
-        if from_retry:
-            if result.code == "CIRCUIT_OPEN":
-                return
-            attempts, exhausted = self._schedule_retry(task_id, result.code)
-            if exhausted:
-                self._record(task_id, False, "RETRY_EXHAUSTED")
-                deleted = False
-                if self._delete_exhausted_enabled and identity:
-                    deleted = self._verified_unlink(path, identity, root)
-                if deleted:
-                    self._clear_retry_state(task_id)
-                    self._sha1_cache.pop(identity, None)
-                    if self._detailed_logs:
-                        logger.warning(
-                            f"#115秒传# 已达到最大重试次数({attempts}/{self._max_retries})，"
-                            f"已安全删除失败文件: {filename}"
-                        )
-                    else:
-                        logger.warning(
-                            f"#115秒传# [简短] 重试耗尽清理=已删除 | 文件={filename} | "
-                            f"重试次数={attempts}/{self._max_retries}"
-                        )
-                    self._remove_empty_parent_dirs(path.parent, root)
-                else:
-                    cleanup_state = "安全校验失败，文件已保留" if self._delete_exhausted_enabled else "文件已保留"
-                    logger.warning(
-                        f"#115秒传# {'已达到最大重试次数' if self._detailed_logs else '[简短] 重试已达上限'}"
-                        f"({attempts}/{self._max_retries})，停止自动重试，{cleanup_state}: {filename}"
-                    )
-                self._send_bot_exhausted(
-                    path, attempts, result.code,
-                    deleted=deleted,
-                    delete_requested=self._delete_exhausted_enabled,
-                )
-            return
-        if not result.retryable or not identity or not same_identity(path, identity, root):
-            return
-        self._move_to_retry(path, identity, task_id)
-
-    def _move_to_retry(self, path: Path, identity: FileIdentity, task_id: str):
-        try:
-            relative = path.resolve(strict=True).relative_to(self._watch_dir)
-            destination = self._unique_destination(self._retry_dir / relative)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.parent.resolve(strict=True).relative_to(self._retry_dir)
-            if path.stat().st_dev != destination.parent.stat().st_dev:
-                raise OSError("CROSS_DEVICE")
-            if not same_identity(path, identity, self._watch_dir):
-                self._record(task_id, False, "FILE_CHANGED")
-                return
-            os.replace(path, destination)
-            if not same_identity(destination, identity, self._retry_dir):
-                if not path.exists():
-                    os.replace(destination, path)
-                self._record(task_id, False, "FILE_CHANGED")
-                return
-            self._initialize_retry(self._task_id(destination, self._retry_dir), "RAPID_MISS")
-            if self._detailed_logs:
-                logger.info(f"#115秒传# 文件已移动到临时目录: {self._safe_log_value(destination)}")
-                logger.info(f"#115秒传# [后台线程-{threading.current_thread().name}] 文件处理完成(移至临时目录): {self._safe_log_value(destination.name)}")
-            else:
-                logger.info(
-                    f"#115秒传# [简短] 已转移临时文件夹 | 文件={self._safe_log_value(destination.name)} | "
-                    f"临时目录={self._safe_log_value(destination.parent)}"
-                )
-        except (OSError, ValueError):
-            self._record(task_id, False, "MOVE_FAILED")
-            logger.warning(f"#115秒传# 移动到临时目录失败: {self._safe_log_value(path.name)}")
-
-    @staticmethod
-    def _verified_unlink(path: Path, identity: FileIdentity, root: Path) -> bool:
-        """Rename, verify, then unlink so a swapped path is never directly deleted."""
-        quarantine = path.with_name(f".{path.name}.p115-delete-{token_hex(8)}")
-        try:
-            if not same_identity(path, identity, root):
-                return False
-            os.replace(path, quarantine)
-            if not same_identity(quarantine, identity, root):
-                if not path.exists():
-                    os.replace(quarantine, path)
-                return False
-            quarantine.unlink()
-            return True
-        except OSError:
-            try:
-                if quarantine.exists() and not path.exists():
-                    os.replace(quarantine, path)
-            except OSError:
-                pass
-            return False
-
-    @staticmethod
-    def _unique_destination(destination: Path) -> Path:
-        if not destination.exists():
-            return destination
-        for index in range(1, 10001):
-            candidate = destination.with_name(f"{destination.stem}.{index}{destination.suffix}")
-            if not candidate.exists():
-                return candidate
-        raise OSError("DESTINATION_EXHAUSTED")
-
-    @staticmethod
-    def _task_id(path: Path, root: Path) -> str:
-        try:
-            value = path.resolve(strict=False).relative_to(root.resolve(strict=True)).as_posix()
-        except (OSError, ValueError):
-            value = "invalid"
-        return sha256(value.encode("utf-8")).hexdigest()[:16]
-
-    def _initialize_retry(self, task_id: str, code: str):
-        state = self.get_data("retry_state") or {}
-        state[task_id] = {
-            "attempts": 0,
-            "code": self._normalize_code(code),
-            "exhausted": False,
-        }
-        self.save_data("retry_state", state)
-
-    def _schedule_retry(self, task_id: str, code: str) -> Tuple[int, bool]:
-        state = self.get_data("retry_state") or {}
-        previous = state.get(task_id, {})
-        attempts = min(int(previous.get("attempts", 0)) + 1, 1000)
-        exhausted = attempts >= self._max_retries
-        state[task_id] = {
-            "attempts": attempts,
-            "code": self._normalize_code(code),
-            "exhausted": exhausted,
-        }
-        self.save_data("retry_state", state)
-        return attempts, exhausted
-
-    def _clear_retry_state(self, task_id: str):
-        state = self.get_data("retry_state") or {}
-        if task_id in state:
-            state.pop(task_id, None)
-            self.save_data("retry_state", state)
-
-    def _send_bot_success(
+        if stat.S_ISLNK(value.st_mode) or not s…5727 tokens truncated…_bot_success(
         self,
         path: Path,
         from_retry: bool,
@@ -981,7 +553,20 @@ class P115RapidRetry(_PluginBase):
     def _remove_empty_parent_dirs(self, start: Path, root: Path):
         try:
             root_resolved = root.resolve(strict=True)
-            current = start
+            start_resolved = start.resolve(strict=True)
+            if start_resolved == root_resolved or not start_resolved.is_relative_to(root_resolved):
+                return
+            protected = {
+                root_resolved,
+                self._watch_dir.resolve(strict=False),
+                self._retry_dir.resolve(strict=False),
+                self._protected_pt_dir.resolve(strict=False),
+                *(path.resolve(strict=False) for path in self._empty_cleanup_roots),
+            }
+            # Remove empty descendants first. A leftover empty child used to keep the
+            # otherwise empty media folder alive after the successful file was removed.
+            self._delete_empty_tree(start_resolved, protected, scheduled=False)
+            current = start_resolved if start_resolved.exists() else start_resolved.parent
             while True:
                 resolved = current.resolve(strict=True)
                 if resolved == root_resolved or not resolved.is_relative_to(root_resolved):
@@ -1001,13 +586,21 @@ class P115RapidRetry(_PluginBase):
         except (OSError, ValueError):
             return
 
-    def cleanup_empty_directories(self):
+    def cleanup_empty_directories(self, deferred: bool = False):
         if not self._enabled or not self._empty_cleanup_enabled or not self._empty_cleanup_identities:
             return
         if not self._operation_lock.acquire(blocking=False):
-            logger.info("#115秒传# 定时空文件夹清理本轮跳过：当前有文件正在处理")
+            self._empty_cleanup_pending.set()
+            self.save_data("empty_cleanup_pending", True)
+            if not deferred:
+                logger.info("#115秒传# 定时空文件夹清理已延后：当前有文件正在处理，释放操作锁后自动执行")
             return
         try:
+            was_deferred = self._empty_cleanup_pending.is_set()
+            self._empty_cleanup_pending.clear()
+            self.save_data("empty_cleanup_pending", False)
+            if deferred or was_deferred:
+                logger.info("#115秒传# 开始执行延后的定时空文件夹清理")
             protected = {
                 *self._empty_cleanup_roots,
                 self._watch_dir,
@@ -1044,7 +637,7 @@ class P115RapidRetry(_PluginBase):
         finally:
             self._operation_lock.release()
 
-    def _delete_empty_tree(self, root: Path, protected: set[Path]) -> int:
+    def _delete_empty_tree(self, root: Path, protected: set[Path], scheduled: bool = True) -> int:
         deleted = 0
         visited = 0
         root_resolved = root.resolve(strict=True)
@@ -1069,9 +662,11 @@ class P115RapidRetry(_PluginBase):
                     current.rmdir()
                     deleted += 1
                     if self._detailed_logs:
-                        logger.info(f"#115秒传# 定时删除空文件夹: {self._safe_log_value(current)}")
+                        prefix = "定时删除空文件夹" if scheduled else "已删除空文件夹"
+                        logger.info(f"#115秒传# {prefix}: {self._safe_log_value(current)}")
                     else:
-                        logger.info(f"#115秒传# [简短] 定时删除空文件夹 | 文件夹={self._safe_log_value(current)}")
+                        prefix = "定时删除空文件夹" if scheduled else "已删除空文件夹"
+                        logger.info(f"#115秒传# [简短] {prefix} | 文件夹={self._safe_log_value(current)}")
                 except (OSError, ValueError):
                     continue
                 continue
@@ -1105,6 +700,7 @@ class P115RapidRetry(_PluginBase):
         return deleted
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        exhausted_items = self._exhausted_retry_items()
         fields = [
             ("cookie", "115 Cookie（明文，密码框隐藏）", "password"),
             ("protected_pt_dir", "受保护的PT下载目录（不扫描）", None),
@@ -1127,11 +723,26 @@ class P115RapidRetry(_PluginBase):
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "插件启用"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "run_rapid_once", "label": "立即运行秒传一次"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "run_retry_once", "label": "立即重试秒传一次"}}]},
+            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "run_selected_retry_once", "label": "手动重试所选耗尽文件"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "notify_enabled", "label": "Bot通知"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "detailed_logs", "label": "详细日志"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "empty_cleanup_enabled", "label": "定时清理空文件夹"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "delete_exhausted_enabled", "label": "重试耗尽后删除文件及空文件夹"}}]},
         ]})
+        content.append({"component": "VRow", "content": [{
+            "component": "VCol", "props": {"cols": 12}, "content": [{
+                "component": "VSelect", "props": {
+                    "model": "manual_retry_files",
+                    "label": "选择已达到重试上限的文件",
+                    "items": exhausted_items,
+                    "multiple": True,
+                    "chips": True,
+                    "clearable": True,
+                    "hint": "仅列出仍位于失败临时目录且已达到重试上限的文件；选择后开启手动重试开关并保存。",
+                    "persistent-hint": True,
+                }
+            }]
+        }]})
         for model, label, field_type in fields:
             props = {"model": model, "label": label, "clearable": False}
             if field_type:
@@ -1149,6 +760,7 @@ class P115RapidRetry(_PluginBase):
             content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": component, "props": props}]}]})
         return [{"component": "VForm", "content": content}], {
             "enabled": False, "run_rapid_once": False, "run_retry_once": False,
+            "run_selected_retry_once": False, "manual_retry_files": [],
             "notify_enabled": False, "detailed_logs": True,
             "delete_exhausted_enabled": False,
             "empty_cleanup_enabled": False, "cookie": "",
@@ -1158,6 +770,36 @@ class P115RapidRetry(_PluginBase):
             "consecutive_failure_limit": 5, "failure_cooldown_minutes": 60,
             "empty_cleanup_root": "", "empty_cleanup_cron": "0 4 * * *",
         }
+
+    def _exhausted_retry_items(self) -> List[Dict[str, str]]:
+        state = self.get_data("retry_state") or {}
+        if not isinstance(state, dict):
+            return []
+        if self._retry_dir == Path() or not self._retry_dir.is_absolute():
+            return []
+        try:
+            root = self._retry_dir.resolve(strict=True)
+        except (OSError, ValueError):
+            return []
+        items: List[Dict[str, str]] = []
+        for path in self._secure_files(root):
+            task_id = self._task_id(path, root)
+            task_state = state.get(task_id, {})
+            if not isinstance(task_state, dict) or not bool(task_state.get("exhausted", False)):
+                continue
+            try:
+                relative = path.resolve(strict=True).relative_to(root).as_posix()
+            except (OSError, ValueError):
+                continue
+            attempts = min(max(int(task_state.get("attempts", 0)), 0), 1000)
+            code = self._normalize_code(str(task_state.get("code", "RAPID_MISS")))
+            items.append({
+                "title": f"{relative}（{attempts}次，{code}）",
+                "value": task_id,
+            })
+            if len(items) >= 500:
+                break
+        return items
 
     def get_page(self) -> List[dict]:
         history = self.get_data("history") or []
@@ -1188,3 +830,4 @@ class P115RapidRetry(_PluginBase):
             self._worker.join(timeout=10)
         self._worker = None
         self._client = None
+
