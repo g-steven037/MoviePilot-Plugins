@@ -64,7 +64,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "（仅自用）监控目录，秒传失败时转移到临时目录，定时重试，秒传成功后删除本地文件，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "1.1.2"
+    plugin_version = "1.1.3"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
@@ -779,7 +779,7 @@ class P115RapidRetry(_PluginBase):
             if len(self._sha1_cache) >= 4096 and identity not in self._sha1_cache:
                 self._sha1_cache.clear()
             self._sha1_cache[identity] = result.sha1
-        self._record(task_id, result.success, result.code)
+        self._record(task_id, result.success, result.code, path=path, attempts=attempt_no)
         self._audit_rapid(path, root, result, from_retry, attempt_no)
 
         self._apply_risk_result(result)
@@ -1004,14 +1004,86 @@ class P115RapidRetry(_PluginBase):
     def _normalize_code(code: str) -> str:
         return code if code in SAFE_CODES else "CLIENT_ERROR"
 
-    def _record(self, task_id: str, success: bool, code: str):
+    @staticmethod
+    def _media_episode(path: Path) -> Tuple[str, str]:
+        """Extract a compact display title and episode range without storing the path."""
+        stem = path.stem
+        episode_match = re.search(
+            r"(?i)(?<![A-Z0-9])S(?P<season>\d{1,2})[ ._-]*E(?P<start>\d{1,4})"
+            r"(?:[ ._]*(?:-|~|至)[ ._-]*(?:S\d{1,2}[ ._-]*)?E?(?P<end>\d{1,4}))?",
+            stem,
+        )
+        season_match = episode_match or re.search(r"(?i)(?<![A-Z0-9])S(?P<season>\d{1,2})(?![A-Z0-9])", stem)
+        title_end = season_match.start() if season_match else len(stem)
+        raw_title = stem[:title_end].strip(" -_.")
+        if re.search(r"[\u3400-\u9fff]", raw_title):
+            chinese_parts = [part for part in re.split(r"[._]", raw_title) if re.search(r"[\u3400-\u9fff]", part)]
+            title = chinese_parts[0] if chinese_parts else raw_title
+        else:
+            title = re.sub(r"[._]+", " ", raw_title).strip(" -_")
+        words = title.split()
+        title = " ".join(word for index, word in enumerate(words) if index == 0 or word != words[index - 1])
+        title = title[:160] or "未知影视"
+        if not season_match:
+            return title, "-"
+        season = int(season_match.group("season"))
+        if not episode_match:
+            return title, f"S{season:02d}"
+        start = int(episode_match.group("start"))
+        end_text = episode_match.group("end")
+        episode = f"S{season:02d}E{start:02d}"
+        if end_text is not None:
+            episode += f"-E{int(end_text):02d}"
+        return title, episode
+
+    @classmethod
+    def _task_status(cls, success: bool, code: str) -> str:
+        normalized = cls._normalize_code(code)
+        if success and normalized == "RAPID_SUCCESS":
+            return "成功"
+        if normalized == "RETRY_EXHAUSTED":
+            return "已停止"
+        if normalized in {"RAPID_MISS", "HOURLY_LIMIT"}:
+            return "等待重试"
+        if normalized == "CIRCUIT_OPEN":
+            return "风控等待"
+        return "失败"
+
+    def _record(
+        self,
+        task_id: str,
+        success: bool,
+        code: str,
+        path: Optional[Path] = None,
+        attempts: Optional[int] = None,
+    ):
         history = self.get_data("history") or []
-        history.insert(0, {
+        task = task_id[:16]
+        previous = next((item for item in history if item.get("task") == task and item.get("media")), None)
+        if previous is None and path is not None:
+            media_key, episode_key = self._media_episode(path)
+            previous = next(
+                (item for item in history if item.get("media") == media_key and item.get("episode") == episode_key),
+                None,
+            )
+        if path is None and previous is None:
+            return
+        media, episode = self._media_episode(path) if path is not None else (
+            str(previous.get("media") or "未知影视"), str(previous.get("episode") or "-"),
+        )
+        retry_count = attempts if attempts is not None else int((previous or {}).get("attempts", 0))
+        item = {
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "task": task_id[:16],
+            "task": task,
+            "media": self._safe_log_value(media, 160),
+            "episode": self._safe_log_value(episode, 32),
+            "attempts": min(max(int(retry_count), 0), 1000),
             "success": bool(success),
+            "status": self._task_status(success, code),
             "code": self._normalize_code(code),
-        })
+        }
+        history = [entry for entry in history if entry.get("task") != task]
+        history.insert(0, item)
         self.save_data("history", history[:200])
 
     @staticmethod
@@ -1306,9 +1378,12 @@ class P115RapidRetry(_PluginBase):
 
     def get_page(self) -> List[dict]:
         history = self.get_data("history") or []
-        rows = [[item.get("time"), item.get("task"), "成功" if item.get("success") else "受控等待", item.get("code")] for item in history]
+        rows = [
+            [item.get("media"), item.get("episode"), item.get("attempts", 0), item.get("status")]
+            for item in history if item.get("media")
+        ]
         return [{"component": "VTable", "props": {"hover": True}, "content": [
-            {"component": "thead", "content": [{"component": "tr", "content": [{"component": "th", "text": title} for title in ("时间", "匿名任务ID", "状态", "安全码")]}]},
+            {"component": "thead", "content": [{"component": "tr", "content": [{"component": "th", "text": title} for title in ("影视", "集数", "重试次数", "状态")]}]},
             {"component": "tbody", "content": [{"component": "tr", "content": [{"component": "td", "text": str(value or "")} for value in row]} for row in rows]},
         ]}]
 
