@@ -216,7 +216,7 @@ def test_retry_limit_and_bot_notifications_are_bounded():
     state = plugin.get_data("retry_state")["task"]
     assert state["exhausted"] is True
 
-    path = Path("private-folder") / "movie.mkv"
+    path = Path("private-folder") / "罪爱.Dearest.S01E08.2026.mkv"
     plugin._notify_enabled = False
     plugin._send_bot_success(path, False)
     assert not plugin._test_messages
@@ -227,12 +227,17 @@ def test_retry_limit_and_bot_notifications_are_bounded():
     plugin._send_bot_exhausted(path, 2, "RAPID_MISS", deleted=True, delete_requested=True)
     assert len(plugin._test_messages) == 4
     assert all(message.get("username") == "admin" for message in plugin._test_messages)
-    assert "重试次数：0" in plugin._test_messages[0]["text"]
-    assert "重试次数：2" in plugin._test_messages[1]["text"]
-    assert "临时目录重试" not in plugin._test_messages[1]["text"]
-    assert "失败文件已安全删除" in plugin._test_messages[-1]["text"]
+    assert plugin._test_messages[0]["title"] == "🟢 罪爱 S01E08 秒传成功"
+    assert plugin._test_messages[0]["text"] == "清理：本地文件已删除"
+    assert plugin._test_messages[1]["title"] == "🟢 罪爱 S01E08 秒传成功"
+    assert plugin._test_messages[1]["text"] == "重试：2/2\n清理：本地文件已删除"
+    assert plugin._test_messages[2]["title"] == "🔴 罪爱 S01E08 秒传失败"
+    assert plugin._test_messages[2]["text"] == ""
+    assert plugin._test_messages[3]["title"] == "🔴 罪爱 S01E08 秒传失败"
+    assert plugin._test_messages[3]["text"] == ""
     serialized = repr(plugin._test_messages)
-    assert "movie.mkv" in serialized
+    assert "Dearest" not in serialized
+    assert ".mkv" not in serialized
     assert "private-folder" not in serialized
     assert "SHA1" not in serialized
     assert "Cookie" not in serialized
