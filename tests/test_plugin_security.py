@@ -716,7 +716,7 @@ def test_asynctools_021_is_rejected_even_when_exports_exist():
         raise AssertionError("incompatible python-asynctools 0.2.1 was accepted")
 
 
-def test_selected_exhausted_retry_only_processes_explicit_files(tmp_path: Path):
+def test_selected_failed_retry_lists_all_states_and_only_processes_explicit_files(tmp_path: Path):
     _install_stubs()
     plugin_root = Path(__file__).parents[1] / "plugins.v2"
     sys.path.insert(0, str(plugin_root))
@@ -725,9 +725,13 @@ def test_selected_exhausted_retry_only_processes_explicit_files(tmp_path: Path):
     retry = tmp_path / "retry"
     retry.mkdir()
     selected = retry / "selected.mkv"
+    waiting = retry / "waiting.mkv"
     skipped = retry / "skipped.mkv"
+    legacy = retry / "legacy.mkv"
     selected.write_bytes(b"selected")
+    waiting.write_bytes(b"waiting")
     skipped.write_bytes(b"skipped")
+    legacy.write_bytes(b"legacy")
 
     plugin = P115RapidRetry()
     plugin._enabled = True
@@ -736,18 +740,28 @@ def test_selected_exhausted_retry_only_processes_explicit_files(tmp_path: Path):
     plugin._max_batch = 10
     plugin._operation_lock = threading.Lock()
     selected_id = plugin._task_id(selected, retry)
+    waiting_id = plugin._task_id(waiting, retry)
     skipped_id = plugin._task_id(skipped, retry)
     plugin.save_data("retry_state", {
         selected_id: {"attempts": 10, "code": "RAPID_MISS", "exhausted": True},
+        waiting_id: {"attempts": 2, "code": "RAPID_MISS", "exhausted": False},
         skipped_id: {"attempts": 10, "code": "RAPID_MISS", "exhausted": True},
     })
     handled = []
     plugin._handle = lambda path, root, identity, from_retry: handled.append(path)
 
-    plugin.retry_selected_exhausted({selected_id})
+    items = plugin._failed_retry_items()
+    legacy_id = plugin._task_id(legacy, retry)
+    assert {item["value"] for item in items} == {selected_id, waiting_id, skipped_id, legacy_id}
+    assert any("等待重试" in item["title"] for item in items if item["value"] == waiting_id)
+    assert any("已达上限" in item["title"] for item in items if item["value"] == selected_id)
 
-    assert handled == [selected]
+    plugin.retry_selected_failed({selected_id, waiting_id, legacy_id})
+
+    assert handled == sorted([selected, waiting, legacy])
     assert plugin.get_data("retry_state")[selected_id]["exhausted"] is True
+    assert plugin.get_data("retry_state")[waiting_id]["attempts"] == 2
+    assert skipped not in handled
 
 
 def test_success_cleanup_removes_empty_descendants_and_parent(tmp_path: Path):
