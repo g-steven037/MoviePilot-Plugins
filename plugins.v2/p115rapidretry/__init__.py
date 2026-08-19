@@ -64,7 +64,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "（仅自用）监控目录，秒传失败时转移到临时目录，定时重试，秒传成功后删除本地文件，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "1.1.3"
+    plugin_version = "1.1.4"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
@@ -565,7 +565,7 @@ class P115RapidRetry(_PluginBase):
                 elif action == "retry_selected":
                     selected = set(self._manual_retry_ids)
                     self._manual_retry_ids.clear()
-                    self.retry_selected_exhausted(selected)
+                    self.retry_selected_failed(selected)
                 elif action == "cancel":
                     pending.pop(raw_path, None)
                 elif len(pending) < 4096:
@@ -657,16 +657,16 @@ class P115RapidRetry(_PluginBase):
         finally:
             self._operation_lock.release()
 
-    def retry_selected_exhausted(self, selected_ids: set[str]):
-        """Retry explicitly selected exhausted files once without re-enabling Cron retries."""
+    def retry_selected_failed(self, selected_ids: set[str]):
+        """Retry explicitly selected failed files once without resetting their retry state."""
         if not selected_ids:
-            logger.warning("#115秒传# 所选耗尽文件重试未执行 | 代码=NO_SELECTION")
+            logger.warning("#115秒传# 所选失败文件重试未执行 | 代码=NO_SELECTION")
             return
         if not self._enabled or not self._client or self._auth_blocked or time() < self._circuit_until:
-            logger.warning("#115秒传# 所选耗尽文件重试未执行 | 代码=CIRCUIT_OPEN")
+            logger.warning("#115秒传# 所选失败文件重试未执行 | 代码=CIRCUIT_OPEN")
             return
         if not self._operation_lock.acquire(blocking=False):
-            logger.warning("#115秒传# 所选耗尽文件重试未执行 | 代码=OPERATION_BUSY")
+            logger.warning("#115秒传# 所选失败文件重试未执行 | 代码=OPERATION_BUSY")
             return
         try:
             state = self.get_data("retry_state") or {}
@@ -677,10 +677,9 @@ class P115RapidRetry(_PluginBase):
             eligible = sorted([
                 files[task_id] for task_id in selected_ids
                 if task_id in files
-                and bool(state.get(task_id, {}).get("exhausted", False))
             ])
             logger.info(
-                f"#115秒传# 开始手动重试所选耗尽文件 | 已选择={len(selected_ids)} | "
+                f"#115秒传# 开始手动重试所选失败文件 | 已选择={len(selected_ids)} | "
                 f"有效={len(eligible)} | 本轮上限={self._max_batch}"
             )
             processed = 0
@@ -689,9 +688,13 @@ class P115RapidRetry(_PluginBase):
                 processed += 1
                 if self._auth_blocked or time() < self._circuit_until:
                     break
-            logger.info(f"#115秒传# 手动重试所选耗尽文件完成 | 本轮处理={processed}")
+            logger.info(f"#115秒传# 手动重试所选失败文件完成 | 本轮处理={processed}")
         finally:
             self._operation_lock.release()
+
+    def retry_selected_exhausted(self, selected_ids: set[str]):
+        """Backward-compatible alias for callers from v1.1.0-v1.1.3."""
+        self.retry_selected_failed(selected_ids)
 
     def _delete_previously_exhausted(self, path: Path, task_id: str, task_state: Dict[str, Any]) -> bool:
         filename = self._safe_log_value(path.name)
@@ -1275,7 +1278,7 @@ class P115RapidRetry(_PluginBase):
         return deleted
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        exhausted_items = self._exhausted_retry_items()
+        failed_items = self._failed_retry_items()
         fields = [
             ("cookie", "115 Cookie（明文，密码框隐藏）", "password"),
             ("protected_pt_dir", "受保护的PT下载目录（不扫描）", None),
@@ -1298,7 +1301,7 @@ class P115RapidRetry(_PluginBase):
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "插件启用"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "run_rapid_once", "label": "立即运行秒传一次"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "run_retry_once", "label": "立即重试秒传一次"}}]},
-            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "run_selected_retry_once", "label": "手动重试所选耗尽文件"}}]},
+            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "run_selected_retry_once", "label": "手动重试所选失败文件"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "notify_enabled", "label": "Bot通知"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "detailed_logs", "label": "详细日志"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "empty_cleanup_enabled", "label": "定时清理空文件夹"}}]},
@@ -1308,12 +1311,12 @@ class P115RapidRetry(_PluginBase):
             "component": "VCol", "props": {"cols": 12}, "content": [{
                 "component": "VSelect", "props": {
                     "model": "manual_retry_files",
-                    "label": "选择已达到重试上限的文件",
-                    "items": exhausted_items,
+                    "label": "选择需要直接重试的失败文件",
+                    "items": failed_items,
                     "multiple": True,
                     "chips": True,
                     "clearable": True,
-                    "hint": "仅列出仍位于失败临时目录且已达到重试上限的文件；选择后开启手动重试开关并保存。",
+                    "hint": "列出失败临时目录中的全部待处理文件；可多选，选择后开启手动重试开关并保存。",
                     "persistent-hint": True,
                 }
             }]
@@ -1346,7 +1349,7 @@ class P115RapidRetry(_PluginBase):
             "empty_cleanup_root": "", "empty_cleanup_cron": "0 4 * * *",
         }
 
-    def _exhausted_retry_items(self) -> List[Dict[str, str]]:
+    def _failed_retry_items(self) -> List[Dict[str, str]]:
         state = self.get_data("retry_state") or {}
         if not isinstance(state, dict):
             return []
@@ -1360,21 +1363,26 @@ class P115RapidRetry(_PluginBase):
         for path in self._secure_files(root):
             task_id = self._task_id(path, root)
             task_state = state.get(task_id, {})
-            if not isinstance(task_state, dict) or not bool(task_state.get("exhausted", False)):
-                continue
+            if not isinstance(task_state, dict):
+                task_state = {}
             try:
                 relative = path.resolve(strict=True).relative_to(root).as_posix()
             except (OSError, ValueError):
                 continue
             attempts = min(max(int(task_state.get("attempts", 0)), 0), 1000)
             code = self._normalize_code(str(task_state.get("code", "RAPID_MISS")))
+            retry_status = "已达上限" if bool(task_state.get("exhausted", False)) else "等待重试"
             items.append({
-                "title": f"{relative}（{attempts}次，{code}）",
+                "title": f"{relative}（{attempts}次，{retry_status}，{code}）",
                 "value": task_id,
             })
             if len(items) >= 500:
                 break
         return items
+
+    def _exhausted_retry_items(self) -> List[Dict[str, str]]:
+        """Backward-compatible name; the panel now exposes all failed files."""
+        return self._failed_retry_items()
 
     def get_page(self) -> List[dict]:
         history = self.get_data("history") or []
