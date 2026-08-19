@@ -523,9 +523,59 @@ def test_realtime_failure_then_retry_success_keeps_pt_file(tmp_path: Path):
         assert not pending.exists()
         serialized = repr(plugin.get_data("history"))
         assert "movie.mkv" not in serialized
+        assert "movie" in serialized
         assert str(tmp_path) not in serialized
     finally:
         plugin.stop_service()
+
+
+def test_task_page_aggregates_media_episode_attempts_and_status():
+    _install_stubs()
+    plugin_root = Path(__file__).parents[1] / "plugins.v2"
+    sys.path.insert(0, str(plugin_root))
+    from p115rapidretry import P115RapidRetry
+
+    plugin = P115RapidRetry()
+    path = Path("/retry/师兄太稳健.Optimized.Cultivation.S01E01-E02.2026.mkv")
+    plugin._record("task-one", False, "RAPID_MISS", path=path, attempts=2)
+    plugin._record("task-one", True, "RAPID_SUCCESS", path=path, attempts=3)
+    plugin.save_data("history", (plugin.get_data("history") or []) + [{
+        "time": "2026-01-01 00:00:00", "task": "legacy", "success": False, "code": "RAPID_MISS",
+    }])
+
+    history = plugin.get_data("history")
+    assert len([item for item in history if item.get("task") == "task-one"]) == 1
+    assert history[0]["media"] == "师兄太稳健"
+    assert history[0]["episode"] == "S01E01-E02"
+    assert history[0]["attempts"] == 3
+    assert history[0]["status"] == "成功"
+    assert "/retry" not in repr(history)
+
+    page = plugin.get_page()[0]
+    headers = [cell["text"] for cell in page["content"][0]["content"][0]["content"]]
+    rows = page["content"][1]["content"]
+    values = [cell["text"] for cell in rows[0]["content"]]
+    assert headers == ["影视", "集数", "重试次数", "状态"]
+    assert values == ["师兄太稳健", "S01E01-E02", "3", "成功"]
+    assert len(rows) == 1
+
+
+def test_task_page_parses_single_episode_and_waiting_status():
+    _install_stubs()
+    plugin_root = Path(__file__).parents[1] / "plugins.v2"
+    sys.path.insert(0, str(plugin_root))
+    from p115rapidretry import P115RapidRetry
+
+    plugin = P115RapidRetry()
+    plugin._record(
+        "task-two", False, "RAPID_MISS",
+        path=Path("师兄太稳健.S01E03.2026.2160p.WEB-DL.mkv"), attempts=3,
+    )
+    item = plugin.get_data("history")[0]
+    assert item["media"] == "师兄太稳健"
+    assert item["episode"] == "S01E03"
+    assert item["attempts"] == 3
+    assert item["status"] == "等待重试"
 
 
 def test_retry_exhaustion_delete_switch_is_safe_and_keeps_pt_file(tmp_path: Path):
@@ -788,4 +838,3 @@ def test_old_worker_uses_generation_local_stop_event():
     worker.join(timeout=1)
 
     assert not worker.is_alive()
-
