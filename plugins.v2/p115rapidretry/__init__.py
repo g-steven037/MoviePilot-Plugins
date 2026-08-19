@@ -959,11 +959,12 @@ class P115RapidRetry(_PluginBase):
         if not self._notify_enabled:
             return
         attempts = 0 if not from_retry else min(max(int(retry_attempts), 1), self._max_retries)
+        media, episode = self._media_episode(path)
+        retry_text = f"重试：{attempts}/{self._max_retries}\n" if from_retry else ""
+        cleanup_text = "本地文件已删除" if cleanup_success else "本地文件未删除，请人工检查"
         self._post_bot(
-            "115秒传成功",
-            f"文件：{self._safe_log_value(path.name, 500)}\n"
-            f"重试次数：{attempts}\n"
-            f"本地清理：{'已安全删除对应文件' if cleanup_success else '文件身份变化，未删除，请人工检查'}",
+            f"🟢 {media} {episode} 秒传成功",
+            f"{retry_text}清理：{cleanup_text}",
         )
 
     def _send_bot_exhausted(
@@ -976,16 +977,10 @@ class P115RapidRetry(_PluginBase):
     ):
         if not self._notify_enabled:
             return
-        if deleted:
-            cleanup_text = "失败文件已安全删除；空父文件夹已按安全规则清理。"
-        elif delete_requested:
-            cleanup_text = "已启用耗尽删除，但安全校验或删除失败，文件已保留在临时目录。"
-        else:
-            cleanup_text = "文件已保留在临时目录。"
+        media, episode = self._media_episode(path)
         self._post_bot(
-            "115秒传重试已停止",
-            f"文件：{self._safe_log_value(path.name, 500)}\n重试次数：{attempts}\n"
-            f"状态：{self._normalize_code(code)}\n{cleanup_text}",
+            f"🔴 {media} {episode} 秒传失败",
+            "",
         )
 
     def _post_bot(self, title: str, text: str):
