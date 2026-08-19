@@ -555,8 +555,9 @@ def test_task_page_aggregates_media_episode_attempts_and_status():
     headers = [cell["text"] for cell in page["content"][0]["content"][0]["content"]]
     rows = page["content"][1]["content"]
     values = [cell["text"] for cell in rows[0]["content"]]
-    assert headers == ["影视", "集数", "重试次数", "状态"]
-    assert values == ["师兄太稳健", "S01E01-E02", "3", "成功"]
+    assert headers == ["影视", "集数", "重试次数", "状态", "时间"]
+    assert values[:4] == ["师兄太稳健", "S01E01-E02", "3", "成功"]
+    assert values[4]
     assert len(rows) == 1
 
 
