@@ -64,7 +64,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "（仅自用）监控目录，秒传失败时转移到临时目录，定时重试，秒传成功后删除本地文件，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "1.1.7"
+    plugin_version = "1.1.8"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
@@ -77,6 +77,7 @@ class P115RapidRetry(_PluginBase):
     _protected_pt_dir = Path()
     _target_pid = "0"
     _cron = "*/10 * * * *"
+    _exhausted_cron = "0 * * * *"
     _stable_seconds = 10
     _max_batch = 10
     _max_retries = 10
@@ -143,9 +144,12 @@ class P115RapidRetry(_PluginBase):
         try:
             self._cron = str(config.get("cron", "*/10 * * * *")).strip()
             CronTrigger.from_crontab(self._cron)
+            self._exhausted_cron = str(config.get("exhausted_cron", "0 * * * *")).strip()
+            CronTrigger.from_crontab(self._exhausted_cron)
             self._stable_seconds = self._bounded_int(config.get("stable_seconds", 10), 1, 3600)
             self._max_batch = self._bounded_int(config.get("max_batch", 10), 1, 100)
-            self._max_retries = self._bounded_int(config.get("max_retries", 10), 1, 100)
+            # A file is considered exhausted only after at least ten attempts.
+            self._max_retries = self._bounded_int(config.get("max_retries", 10), 10, 100)
             self._min_request_interval = self._bounded_int(config.get("min_request_interval", 30), 5, 300)
             self._hourly_request_limit = self._bounded_int(config.get("hourly_request_limit", 30), 1, 120)
             self._consecutive_failure_limit = self._bounded_int(
@@ -471,6 +475,13 @@ class P115RapidRetry(_PluginBase):
             "func": self.retry_pending,
             "kwargs": {},
         }]
+        services.append({
+            "id": "P115RapidRetry_exhausted_retry",
+            "name": "115秒传重试耗尽文件定时重试",
+            "trigger": CronTrigger.from_crontab(self._exhausted_cron),
+            "func": self.retry_exhausted_pending,
+            "kwargs": {},
+        })
         if self._empty_cleanup_enabled:
             services.append({
                 "id": "P115RapidRetry_empty_cleanup",
@@ -646,21 +657,7 @@ class P115RapidRetry(_PluginBase):
                 task_id = self._task_id(path, self._retry_dir)
                 task_state = state.get(task_id, {})
                 if bool(task_state.get("exhausted", False)):
-                    # Exhausted files are eligible again on the next cron run.
-                    # Reset the attempt counter before retrying so the normal
-                    # bounded retry policy applies to a fresh 10-attempt cycle.
-                    if not self._delete_exhausted_enabled:
-                        refreshed = dict(task_state)
-                        refreshed.update({"attempts": 0, "exhausted": False, "last_retry": 0})
-                        state[task_id] = refreshed
-                        self.save_data("retry_state", state)
-                        logger.info(
-                            f"#115秒传# 定时重试耗尽文件 | 文件={self._safe_log_value(path.name)} | "
-                            f"已完成重试={task_state.get('attempts', self._max_retries)}，开始新一轮"
-                        )
-                        self._handle(path, self._retry_dir, None, from_retry=True)
-                        processed += 1
-                    elif self._delete_exhausted_enabled:
+                    if self._delete_exhausted_enabled:
                         self._delete_previously_exhausted(path, task_id, task_state)
                         processed += 1
                         if processed >= self._max_batch:
@@ -672,6 +669,48 @@ class P115RapidRetry(_PluginBase):
                     break
             if manual:
                 logger.info(f"#115秒传# 立即重试秒传完成 | 本轮处理={processed}")
+        finally:
+            self._operation_lock.release()
+
+    def retry_exhausted_pending(self):
+        """Retry only files that reached the maximum attempts on a separate Cron."""
+        if not self._enabled or not self._client or self._auth_blocked or time() < self._circuit_until:
+            return
+        if not self._operation_lock.acquire(blocking=False):
+            logger.info("#115秒传# 耗尽文件定时重试延后：当前有文件正在处理")
+            return
+        try:
+            state = self.get_data("retry_state") or {}
+            files = self._secure_files(self._retry_dir)
+            exhausted = [
+                path for path in files
+                if bool(state.get(self._task_id(path, self._retry_dir), {}).get("exhausted", False))
+            ]
+            if not exhausted:
+                logger.info("#115秒传# 耗尽文件定时重试完成 | 待重试=0")
+                return
+            processed = 0
+            for path in exhausted[:self._max_batch]:
+                task_id = self._task_id(path, self._retry_dir)
+                task_state = state.get(task_id, {})
+                if self._delete_exhausted_enabled:
+                    self._delete_previously_exhausted(path, task_id, task_state)
+                else:
+                    refreshed = dict(task_state)
+                    refreshed.update({"attempts": 0, "exhausted": False, "last_retry": 0})
+                    state[task_id] = refreshed
+                    self.save_data("retry_state", state)
+                    logger.info(
+                        f"#115秒传# 耗尽文件进入新重试周期 | 文件={self._safe_log_value(path.name)} | "
+                        f"上周期次数={task_state.get('attempts', self._max_retries)}/{self._max_retries}"
+                    )
+                    self._handle(path, self._retry_dir, None, from_retry=True)
+                processed += 1
+                if self._auth_blocked or time() < self._circuit_until:
+                    break
+            logger.info(
+                f"#115秒传# 耗尽文件定时重试完成 | 发现={len(exhausted)} | 本轮处理={processed}"
+            )
         finally:
             self._operation_lock.release()
 
@@ -1297,10 +1336,11 @@ class P115RapidRetry(_PluginBase):
             ("watch_dir", "硬链接实时监控目录", None),
             ("retry_dir", "失败临时目录", None),
             ("target_pid", "115目标目录ID（根目录为0）", None),
-            ("cron", "临时目录重试 Cron（5段，含重试耗尽文件）", None),
+            ("cron", "临时目录普通失败重试 Cron（5段）", None),
+            ("exhausted_cron", "重试耗尽文件独立 Cron（5段）", None),
             ("stable_seconds", "文件稳定等待秒数（1-3600）", "number"),
             ("max_batch", "每轮最大重试文件数（1-100）", "number"),
-            ("max_retries", "单文件最大重试次数（1-100）", "number"),
+            ("max_retries", "单文件最大重试次数（10-100）", "number"),
             ("min_request_interval", "115请求最小间隔秒数（5-300）", "number"),
             ("hourly_request_limit", "每小时最多115请求数（1-120）", "number"),
             ("consecutive_failure_limit", "连续技术失败熔断次数（2-20）", "number"),
@@ -1340,7 +1380,7 @@ class P115RapidRetry(_PluginBase):
             "exhausted_policy": "keep", "delete_exhausted_enabled": False,
             "empty_cleanup_enabled": False, "cookie": "",
             "protected_pt_dir": "", "watch_dir": "", "retry_dir": "", "target_pid": "0",
-            "cron": "*/10 * * * *", "stable_seconds": 10, "max_batch": 10, "max_retries": 10,
+            "cron": "*/10 * * * *", "exhausted_cron": "0 * * * *", "stable_seconds": 10, "max_batch": 10, "max_retries": 10,
             "min_request_interval": 30, "hourly_request_limit": 30,
             "consecutive_failure_limit": 5, "failure_cooldown_minutes": 60,
             "empty_cleanup_root": "", "empty_cleanup_cron": "0 4 * * *",
