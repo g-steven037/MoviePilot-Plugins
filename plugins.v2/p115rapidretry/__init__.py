@@ -64,7 +64,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "（仅自用）监控目录，秒传失败时转移到临时目录，定时重试，秒传成功后删除本地文件，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "1.1.5"
+    plugin_version = "1.1.6"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
@@ -113,9 +113,12 @@ class P115RapidRetry(_PluginBase):
     def init_plugin(self, config: dict = None):
         self.stop_service()
         config = config or {}
-        run_rapid_once = bool(config.get("run_rapid_once", False))
-        run_retry_once = bool(config.get("run_retry_once", False))
-        run_selected_retry_once = bool(config.get("run_selected_retry_once", False))
+        run_action = str(config.get("run_action", "none")).strip().lower()
+        if run_action not in {"none", "scan_now", "retry_now", "retry_selected"}:
+            run_action = "none"
+        run_rapid_once = bool(config.get("run_rapid_once", False)) or run_action == "scan_now"
+        run_retry_once = bool(config.get("run_retry_once", False)) or run_action == "retry_now"
+        run_selected_retry_once = bool(config.get("run_selected_retry_once", False)) or run_action == "retry_selected"
         selected_retry_ids = config.get("manual_retry_files") or []
         if not isinstance(selected_retry_ids, list):
             selected_retry_ids = []
@@ -151,11 +154,11 @@ class P115RapidRetry(_PluginBase):
             self._failure_cooldown_minutes = self._bounded_int(
                 config.get("failure_cooldown_minutes", 60), 10, 1440
             )
-            self._delete_exhausted_enabled = bool(config.get("delete_exhausted_enabled", False))
+            exhausted_policy = str(config.get("exhausted_policy", "")).strip().lower()
+            self._delete_exhausted_enabled = (exhausted_policy == "delete" if exhausted_policy in {"keep", "delete"} else bool(config.get("delete_exhausted_enabled", False)))
             self._notify_enabled = bool(config.get("notify_enabled", False))
-            self._detailed_logs = bool(
-                config.get("detailed_logs", str(config.get("log_mode", "detailed")).strip().lower() == "detailed")
-            )
+            log_mode = str(config.get("log_mode", "")).strip().lower()
+            self._detailed_logs = log_mode == "detailed" if log_mode in {"detailed", "brief"} else bool(config.get("detailed_logs", True))
             self._empty_cleanup_enabled = bool(config.get("empty_cleanup_enabled", False))
             self._target_pid = self._validate_pid(str(config.get("target_pid", "0")).strip())
             self._watch_dir = self._prepare_path(config.get("watch_dir"), create=True)
@@ -182,6 +185,7 @@ class P115RapidRetry(_PluginBase):
                 config["run_rapid_once"] = False
                 config["run_retry_once"] = False
                 config["run_selected_retry_once"] = False
+                config["run_action"] = "none"
                 config["manual_retry_files"] = []
                 self.update_config(config)
             self._start_realtime_monitor(queue_existing=False)
@@ -1294,13 +1298,11 @@ class P115RapidRetry(_PluginBase):
         content = [{"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "text": "Cookie 仅用于登录115官方接口，不发送给其他第三方，不写入插件日志或历史；MoviePilot 会将其保存在自身配置中，请保护管理端和数据目录。"}}]}]}]
         content.append({"component": "VRow", "content": [
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "插件启用"}}]},
-            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "run_rapid_once", "label": "立即运行秒传一次"}}]},
-            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "run_retry_once", "label": "立即重试秒传一次"}}]},
-            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "run_selected_retry_once", "label": "手动重试所选失败文件"}}]},
+            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "run_action", "label": "保存后执行一次操作", "items": [{"title": "不执行", "value": "none"}, {"title": "立即扫描并秒传", "value": "scan_now"}, {"title": "立即重试全部", "value": "retry_now"}, {"title": "重试所选失败文件", "value": "retry_selected"}], "clearable": False}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "notify_enabled", "label": "Bot通知"}}]},
-            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "detailed_logs", "label": "详细日志"}}]},
+            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "log_mode", "label": "日志级别", "items": [{"title": "详细日志", "value": "detailed"}, {"title": "简短日志", "value": "brief"}], "clearable": False}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "empty_cleanup_enabled", "label": "定时清理空文件夹"}}]},
-            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "delete_exhausted_enabled", "label": "重试耗尽后删除文件及空文件夹"}}]},
+            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "exhausted_policy", "label": "重试耗尽处理", "items": [{"title": "保留文件（推荐）", "value": "keep"}, {"title": "删除文件及空文件夹", "value": "delete"}], "clearable": False}}]},
         ]})
         content.append({"component": "VRow", "content": [{
             "component": "VCol", "props": {"cols": 12}, "content": [{
@@ -1332,10 +1334,10 @@ class P115RapidRetry(_PluginBase):
                 })
             content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": component, "props": props}]}]})
         return [{"component": "VForm", "content": content}], {
-            "enabled": False, "run_rapid_once": False, "run_retry_once": False,
+            "enabled": False, "run_action": "none", "run_rapid_once": False, "run_retry_once": False,
             "run_selected_retry_once": False, "manual_retry_files": [],
-            "notify_enabled": False, "detailed_logs": True,
-            "delete_exhausted_enabled": False,
+            "notify_enabled": False, "log_mode": "detailed", "detailed_logs": True,
+            "exhausted_policy": "keep", "delete_exhausted_enabled": False,
             "empty_cleanup_enabled": False, "cookie": "",
             "protected_pt_dir": "", "watch_dir": "", "retry_dir": "", "target_pid": "0",
             "cron": "*/10 * * * *", "stable_seconds": 10, "max_batch": 10, "max_retries": 10,
