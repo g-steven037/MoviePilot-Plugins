@@ -64,7 +64,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "（仅自用）监控目录，秒传失败时转移到临时目录，定时重试，秒传成功后删除本地文件，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "1.1.6"
+    plugin_version = "1.1.7"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
@@ -646,7 +646,21 @@ class P115RapidRetry(_PluginBase):
                 task_id = self._task_id(path, self._retry_dir)
                 task_state = state.get(task_id, {})
                 if bool(task_state.get("exhausted", False)):
-                    if self._delete_exhausted_enabled:
+                    # Exhausted files are eligible again on the next cron run.
+                    # Reset the attempt counter before retrying so the normal
+                    # bounded retry policy applies to a fresh 10-attempt cycle.
+                    if not self._delete_exhausted_enabled:
+                        refreshed = dict(task_state)
+                        refreshed.update({"attempts": 0, "exhausted": False, "last_retry": 0})
+                        state[task_id] = refreshed
+                        self.save_data("retry_state", state)
+                        logger.info(
+                            f"#115秒传# 定时重试耗尽文件 | 文件={self._safe_log_value(path.name)} | "
+                            f"已完成重试={task_state.get('attempts', self._max_retries)}，开始新一轮"
+                        )
+                        self._handle(path, self._retry_dir, None, from_retry=True)
+                        processed += 1
+                    elif self._delete_exhausted_enabled:
                         self._delete_previously_exhausted(path, task_id, task_state)
                         processed += 1
                         if processed >= self._max_batch:
@@ -1277,14 +1291,13 @@ class P115RapidRetry(_PluginBase):
         return deleted
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        failed_items = self._failed_retry_items()
         fields = [
             ("cookie", "115 Cookie（明文，密码框隐藏）", "password"),
             ("protected_pt_dir", "受保护的PT下载目录（不扫描）", None),
             ("watch_dir", "硬链接实时监控目录", None),
             ("retry_dir", "失败临时目录", None),
             ("target_pid", "115目标目录ID（根目录为0）", None),
-            ("cron", "临时目录重试 Cron（5段）", None),
+            ("cron", "临时目录重试 Cron（5段，含重试耗尽文件）", None),
             ("stable_seconds", "文件稳定等待秒数（1-3600）", "number"),
             ("max_batch", "每轮最大重试文件数（1-100）", "number"),
             ("max_retries", "单文件最大重试次数（1-100）", "number"),
@@ -1298,26 +1311,13 @@ class P115RapidRetry(_PluginBase):
         content = [{"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "text": "Cookie 仅用于登录115官方接口，不发送给其他第三方，不写入插件日志或历史；MoviePilot 会将其保存在自身配置中，请保护管理端和数据目录。"}}]}]}]
         content.append({"component": "VRow", "content": [
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "插件启用"}}]},
-            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "run_action", "label": "保存后执行一次操作", "items": [{"title": "不执行", "value": "none"}, {"title": "立即扫描并秒传", "value": "scan_now"}, {"title": "立即重试全部", "value": "retry_now"}, {"title": "重试所选失败文件", "value": "retry_selected"}], "clearable": False}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "notify_enabled", "label": "Bot通知"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "log_mode", "label": "日志级别", "items": [{"title": "详细日志", "value": "detailed"}, {"title": "简短日志", "value": "brief"}], "clearable": False}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "empty_cleanup_enabled", "label": "定时清理空文件夹"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "exhausted_policy", "label": "重试耗尽处理", "items": [{"title": "保留文件（推荐）", "value": "keep"}, {"title": "删除文件及空文件夹", "value": "delete"}], "clearable": False}}]},
         ]})
-        content.append({"component": "VRow", "content": [{
-            "component": "VCol", "props": {"cols": 12}, "content": [{
-                "component": "VSelect", "props": {
-                    "model": "manual_retry_files",
-                    "label": "选择需要直接重试的失败文件",
-                    "items": failed_items,
-                    "multiple": True,
-                    "chips": True,
-                    "clearable": True,
-                    "hint": "列出失败临时目录中的全部待处理文件；可多选，选择后开启手动重试开关并保存。",
-                    "persistent-hint": True,
-                }
-            }]
-        }]})
+        # Failed files are retried by the configured cron after reaching the
+        # maximum attempt count; no manual multi-select control is exposed.
         for model, label, field_type in fields:
             props = {"model": model, "label": label, "clearable": False}
             if field_type:
