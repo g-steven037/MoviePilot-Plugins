@@ -64,7 +64,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "（仅自用）监控目录，秒传失败时转移到临时目录，定时重试，秒传成功后删除本地文件，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "1.1.8"
+    plugin_version = "1.1.9"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
@@ -87,6 +87,7 @@ class P115RapidRetry(_PluginBase):
     _failure_cooldown_minutes = 60
     _delete_exhausted_enabled = False
     _notify_enabled = False
+    _notify_mode = "none"
     _detailed_logs = True
     _empty_cleanup_enabled = False
     _empty_cleanup_roots: List[Path] = []
@@ -108,6 +109,7 @@ class P115RapidRetry(_PluginBase):
     _consecutive_failures = 0
     _risk_notices: set[str] = set()
     _sha1_cache: Dict[FileIdentity, str] = {}
+    _tmdb_display_cache: Dict[str, Tuple[str, str]] = {}
     _manual_retry_ids: set[str] = set()
     _empty_cleanup_pending = threading.Event()
 
@@ -138,6 +140,7 @@ class P115RapidRetry(_PluginBase):
         self._consecutive_failures = 0
         self._risk_notices = set()
         self._sha1_cache = {}
+        self._tmdb_display_cache = {}
         if not self._enabled:
             return
 
@@ -160,7 +163,11 @@ class P115RapidRetry(_PluginBase):
             )
             exhausted_policy = str(config.get("exhausted_policy", "")).strip().lower()
             self._delete_exhausted_enabled = (exhausted_policy == "delete" if exhausted_policy in {"keep", "delete"} else bool(config.get("delete_exhausted_enabled", False)))
-            self._notify_enabled = bool(config.get("notify_enabled", False))
+            notify_mode = str(config.get("notify_mode", "")).strip().lower()
+            if notify_mode not in {"none", "success", "failure", "both"}:
+                notify_mode = "both" if bool(config.get("notify_enabled", False)) else "none"
+            self._notify_mode = notify_mode
+            self._notify_enabled = notify_mode != "none"
             log_mode = str(config.get("log_mode", "")).strip().lower()
             self._detailed_logs = log_mode == "detailed" if log_mode in {"detailed", "brief"} else bool(config.get("detailed_logs", True))
             self._empty_cleanup_enabled = bool(config.get("empty_cleanup_enabled", False))
@@ -1013,7 +1020,7 @@ class P115RapidRetry(_PluginBase):
         cleanup_success: bool = True,
         retry_attempts: int = 0,
     ):
-        if not self._notify_enabled:
+        if not self._notify_enabled or self._notify_mode not in {"success", "both"}:
             return
         attempts = 0 if not from_retry else min(max(int(retry_attempts), 1), self._max_retries)
         media, episode = self._media_episode(path)
@@ -1032,7 +1039,7 @@ class P115RapidRetry(_PluginBase):
         deleted: bool = False,
         delete_requested: bool = False,
     ):
-        if not self._notify_enabled:
+        if not self._notify_enabled or self._notify_mode not in {"failure", "both"}:
             return
         media, episode = self._media_episode(path)
         self._post_bot(
@@ -1060,7 +1067,7 @@ class P115RapidRetry(_PluginBase):
         return code if code in SAFE_CODES else "CLIENT_ERROR"
 
     @staticmethod
-    def _media_episode(path: Path) -> Tuple[str, str]:
+    def _local_media_episode(path: Path) -> Tuple[str, str]:
         """Extract a compact display title and episode range without storing the path."""
         stem = path.stem
         episode_match = re.search(
@@ -1091,6 +1098,63 @@ class P115RapidRetry(_PluginBase):
             episode += f"-E{int(end_text):02d}"
         return title, episode
 
+    def _media_episode(self, path: Path) -> Tuple[str, str]:
+        """Return a notification-friendly title, preferring MoviePilot/TMDB recognition.
+
+        Recognition is best-effort and kept in an in-memory cache.  A failed or
+        unavailable TMDB lookup never blocks 秒传, and the local filename parser
+        remains the fallback.  No path or TMDB response is persisted.
+        """
+        local_title, local_episode = self._local_media_episode(path)
+        cache_key = f"{path.name}\0{path.parent.name}\0{path.parent.parent.name}"
+        cached = self._tmdb_display_cache.get(cache_key)
+        if cached:
+            return cached
+        display = (local_title, local_episode)
+        try:
+            # These are MoviePilot's own recognition interfaces.  Import lazily
+            # so a missing optional module cannot prevent the plugin from loading.
+            from app.chain.media import MediaChain
+            from app.core.metainfo import MetaInfoPath
+
+            meta = MetaInfoPath(path)
+            mediainfo = MediaChain().recognize_by_meta(
+                meta, obtain_images=False
+            )
+            if mediainfo:
+                tmdb_id = getattr(mediainfo, "tmdb_id", None)
+                source = str(getattr(mediainfo, "source", "") or "").lower()
+                # Only use a canonical title when the result is TMDB-backed;
+                # this avoids replacing a useful local title with an unrelated
+                # fallback match from another provider.
+                if tmdb_id and (source in {"", "themoviedb", "tmdb"}):
+                    title = str(
+                        getattr(mediainfo, "title", None)
+                        or getattr(mediainfo, "en_title", None)
+                        or local_title
+                    ).strip()
+                    season = getattr(meta, "begin_season", None)
+                    if season is None:
+                        season = getattr(mediainfo, "season", None)
+                    begin_episode = getattr(meta, "begin_episode", None)
+                    end_episode = getattr(meta, "end_episode", None)
+                    if season is not None and begin_episode is not None:
+                        episode = f"S{int(season):02d}E{int(begin_episode):02d}"
+                        if end_episode is not None and int(end_episode) != int(begin_episode):
+                            episode += f"-E{int(end_episode):02d}"
+                        display = (title[:160] or local_title, episode)
+                    elif title:
+                        display = (title[:160], local_episode)
+        except Exception:
+            # Notification formatting must never make the worker fail.  Keep
+            # this silent because the detailed audit log already has the source
+            # filename and a failed recognition is not an upload failure.
+            pass
+        if len(self._tmdb_display_cache) >= 1024:
+            self._tmdb_display_cache.clear()
+        self._tmdb_display_cache[cache_key] = display
+        return display
+
     @classmethod
     def _task_status(cls, success: bool, code: str) -> str:
         normalized = cls._normalize_code(code)
@@ -1116,14 +1180,16 @@ class P115RapidRetry(_PluginBase):
         task = task_id[:16]
         previous = next((item for item in history if item.get("task") == task and item.get("media")), None)
         if previous is None and path is not None:
-            media_key, episode_key = self._media_episode(path)
+            # History updates must remain local and deterministic.  TMDB
+            # recognition is reserved for an actual enabled Bot notification.
+            media_key, episode_key = self._local_media_episode(path)
             previous = next(
                 (item for item in history if item.get("media") == media_key and item.get("episode") == episode_key),
                 None,
             )
         if path is None and previous is None:
             return
-        media, episode = self._media_episode(path) if path is not None else (
+        media, episode = self._local_media_episode(path) if path is not None else (
             str(previous.get("media") or "未知影视"), str(previous.get("episode") or "-"),
         )
         retry_count = attempts if attempts is not None else int((previous or {}).get("attempts", 0))
@@ -1351,7 +1417,7 @@ class P115RapidRetry(_PluginBase):
         content = [{"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "text": "Cookie 仅用于登录115官方接口，不发送给其他第三方，不写入插件日志或历史；MoviePilot 会将其保存在自身配置中，请保护管理端和数据目录。"}}]}]}]
         content.append({"component": "VRow", "content": [
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "插件启用"}}]},
-            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "notify_enabled", "label": "Bot通知"}}]},
+            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "notify_mode", "label": "Bot通知策略", "items": [{"title": "关闭通知", "value": "none"}, {"title": "仅秒传成功", "value": "success"}, {"title": "仅失败（重试耗尽）", "value": "failure"}, {"title": "成功和失败", "value": "both"}], "clearable": False}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "log_mode", "label": "日志级别", "items": [{"title": "详细日志", "value": "detailed"}, {"title": "简短日志", "value": "brief"}], "clearable": False}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "empty_cleanup_enabled", "label": "定时清理空文件夹"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "exhausted_policy", "label": "重试耗尽处理", "items": [{"title": "保留文件（推荐）", "value": "keep"}, {"title": "删除文件及空文件夹", "value": "delete"}], "clearable": False}}]},
@@ -1376,7 +1442,7 @@ class P115RapidRetry(_PluginBase):
         return [{"component": "VForm", "content": content}], {
             "enabled": False, "run_action": "none", "run_rapid_once": False, "run_retry_once": False,
             "run_selected_retry_once": False, "manual_retry_files": [],
-            "notify_enabled": False, "log_mode": "detailed", "detailed_logs": True,
+            "notify_mode": "none", "notify_enabled": False, "log_mode": "detailed", "detailed_logs": True,
             "exhausted_policy": "keep", "delete_exhausted_enabled": False,
             "empty_cleanup_enabled": False, "cookie": "",
             "protected_pt_dir": "", "watch_dir": "", "retry_dir": "", "target_pid": "0",
