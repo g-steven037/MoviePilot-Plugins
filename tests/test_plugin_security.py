@@ -221,6 +221,7 @@ def test_retry_limit_and_bot_notifications_are_bounded():
     plugin._send_bot_success(path, False)
     assert not plugin._test_messages
     plugin._notify_enabled = True
+    plugin._notify_mode = "both"
     plugin._send_bot_success(path, False)
     plugin._send_bot_success(path, True, retry_attempts=2)
     plugin._send_bot_exhausted(path, 2, "RAPID_MISS")
@@ -556,12 +557,14 @@ def test_task_page_aggregates_media_episode_attempts_and_status():
     assert history[0]["status"] == "成功"
     assert "/retry" not in repr(history)
 
-    page = plugin.get_page()[0]
-    headers = [cell["text"] for cell in page["content"][0]["content"][0]["content"]]
-    rows = page["content"][1]["content"]
-    values = [cell["text"] for cell in rows[0]["content"]]
+    page = plugin.get_page()
+    table = next(item for item in page if item.get("component") == "VTable")
+    headers = [cell["text"] for cell in table["content"][0]["content"][0]["content"]]
+    rows = table["content"][1]["content"]
+    values = [cell.get("text", "") for cell in rows[0]["content"]]
     assert headers == ["影视", "集数", "重试次数", "状态", "时间"]
-    assert values[:4] == ["师兄太稳健", "S01E01-E02", "3", "成功"]
+    assert values[:3] == ["师兄太稳健", "S01E01-E02", "3/10"]
+    assert rows[0]["content"][3]["content"][0]["text"] == "成功"
     assert values[4]
     assert len(rows) == 1
 
@@ -582,6 +585,43 @@ def test_task_page_parses_single_episode_and_waiting_status():
     assert item["episode"] == "S01E03"
     assert item["attempts"] == 3
     assert item["status"] == "等待重试"
+
+
+def test_task_page_shows_summary_and_status_badges():
+    _install_stubs()
+    plugin_root = Path(__file__).parents[1] / "plugins.v2"
+    sys.path.insert(0, str(plugin_root))
+    from p115rapidretry import P115RapidRetry
+
+    plugin = P115RapidRetry()
+    plugin._max_retries = 10
+    plugin._record(
+        "success-task", True, "RAPID_SUCCESS",
+        path=Path("牧神记.S01E17.2026.mkv"), attempts=2,
+    )
+    plugin._record(
+        "waiting-task", False, "RAPID_MISS",
+        path=Path("猎罪现场.S01E18.2026.mkv"), attempts=5,
+    )
+    plugin._record(
+        "failed-task", False, "CLIENT_ERROR",
+        path=Path("九门.S01E08.2026.mkv"), attempts=10,
+    )
+
+    page = plugin.get_page()
+    assert page[0]["component"] == "VRow"
+    summary_text = repr(page[:2])
+    assert "总任务 3" in summary_text
+    assert "成功 1" in summary_text
+    assert "重试中 1" in summary_text
+    assert "失败 1" in summary_text
+
+    table = next(item for item in page if item.get("component") == "VTable")
+    rows = table["content"][1]["content"]
+    waiting_row = next(row for row in rows if "猎罪现场" in repr(row))
+    assert "5/10" in repr(waiting_row)
+    assert "等待重试" in repr(waiting_row)
+    assert "color" in repr(waiting_row)
 
 
 def test_retry_exhaustion_delete_switch_is_safe_and_keeps_pt_file(tmp_path: Path):

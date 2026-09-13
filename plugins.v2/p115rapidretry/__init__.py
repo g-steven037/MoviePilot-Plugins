@@ -64,7 +64,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "（仅自用）监控目录，秒传失败时转移到临时目录，定时重试，秒传成功后删除本地文件，仅自用测试。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "1.1.9"
+    plugin_version = "1.2.0"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
@@ -1487,8 +1487,83 @@ class P115RapidRetry(_PluginBase):
         """Backward-compatible name; the panel now exposes all failed files."""
         return self._failed_retry_items()
 
+    @classmethod
+    def _page_status_group(cls, status: Any) -> str:
+        value = str(status or "失败").strip()
+        if value == "成功":
+            return "success"
+        if value in {"等待重试", "风控等待"}:
+            return "waiting"
+        return "failure"
+
+    @classmethod
+    def _page_status_color(cls, status: Any) -> str:
+        return {
+            "success": "success",
+            "waiting": "warning",
+            "failure": "error",
+        }[cls._page_status_group(status)]
+
+    def _page_summary(self, history: List[dict]) -> Dict[str, int]:
+        summary = {"total": 0, "success": 0, "waiting": 0, "failure": 0}
+        for item in history:
+            if not item.get("media"):
+                continue
+            summary["total"] += 1
+            summary[self._page_status_group(item.get("status"))] += 1
+        return summary
+
     def get_page(self) -> List[dict]:
         history = self.get_data("history") or []
+        if not isinstance(history, list):
+            history = []
+        summary = self._page_summary(history)
+        latest_time = next(
+            (str(item.get("time")) for item in history if item.get("media") and item.get("time")),
+            "暂无记录",
+        )
+        service_state = "监控运行中" if self._enabled else "监控未启动"
+        summary_items = (
+            ("总任务", summary["total"], "info"),
+            ("成功", summary["success"], "success"),
+            ("重试中", summary["waiting"], "warning"),
+            ("失败", summary["failure"], "error"),
+        )
+        summary_row = {
+            "component": "VRow",
+            "content": [
+                {
+                    "component": "VCol",
+                    "props": {"cols": 12, "sm": 6, "md": 3},
+                    "content": [{
+                        "component": "VAlert",
+                        "props": {
+                            "type": color,
+                            "variant": "tonal",
+                            "density": "compact",
+                            "text": f"{label} {count}",
+                        },
+                    }],
+                }
+                for label, count, color in summary_items
+            ],
+        }
+        status_row = {
+            "component": "VRow",
+            "content": [{
+                "component": "VCol",
+                "props": {"cols": 12},
+                "content": [{
+                    "component": "VAlert",
+                    "props": {
+                        "type": "info" if self._enabled else "warning",
+                        "variant": "tonal",
+                        "density": "compact",
+                        "text": f"{service_state} · 最近记录：{latest_time}",
+                    },
+                }],
+            }],
+        }
         rows = [
             [
                 item.get("media"), item.get("episode"), item.get("attempts", 0),
@@ -1496,10 +1571,37 @@ class P115RapidRetry(_PluginBase):
             ]
             for item in history if item.get("media")
         ]
-        return [{"component": "VTable", "props": {"hover": True}, "content": [
+        table_content = [
             {"component": "thead", "content": [{"component": "tr", "content": [{"component": "th", "text": title} for title in ("影视", "集数", "重试次数", "状态", "时间")]}]},
-            {"component": "tbody", "content": [{"component": "tr", "content": [{"component": "td", "text": str(value or "")} for value in row]} for row in rows]},
-        ]}]
+            {"component": "tbody", "content": []},
+        ]
+        for media, episode, attempts, status, item_time in rows:
+            status_text = str(status or "失败")
+            table_content[1]["content"].append({
+                "component": "tr",
+                "content": [
+                    {"component": "td", "text": str(media or "")},
+                    {"component": "td", "text": str(episode or "-")},
+                    {"component": "td", "text": f"{max(int(attempts or 0), 0)}/{self._max_retries}"},
+                    {"component": "td", "content": [{
+                        "component": "VChip",
+                        "props": {
+                            "color": self._page_status_color(status_text),
+                            "size": "small",
+                            "variant": "tonal",
+                        },
+                        "text": status_text,
+                    }]},
+                    {"component": "td", "text": str(item_time or "")},
+                ],
+            })
+        table = {"component": "VTable", "props": {"hover": True, "density": "comfortable"}, "content": table_content}
+        page: List[dict] = [summary_row, status_row]
+        if rows:
+            page.append(table)
+        else:
+            page.append({"component": "VAlert", "props": {"type": "info", "variant": "tonal", "text": "暂无秒传记录"}})
+        return page
 
     def get_command(self):
         return None
