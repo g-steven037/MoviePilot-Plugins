@@ -1,0 +1,32 @@
+name: Security and plugin validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: plugins.v2/p115rapidretry/requirements.txt
+      - name: Scan repository for secrets
+        run: python tools/security_scan.py
+      - name: Install exact runtime dependencies
+        run: python -m pip install --disable-pip-version-check -r plugins.v2/p115rapidretry/requirements.txt
+      - name: Compile
+        run: python -m compileall -q plugins.v2 plugins.v3 tests tools
+      - name: Run security and realtime integration tests
+        run: python tests/run_all.py

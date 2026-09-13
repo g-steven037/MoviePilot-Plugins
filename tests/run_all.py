@@ -14,6 +14,8 @@ import test_emby_library_cover as emby
 import test_download_capacity_guard as capacity
 import test_emby_actor_chinese as actor_chinese
 import test_subscribe_assistant as subscribe_assistant
+import test_v3_adaptation as v3_adaptation
+import test_v3_runtime as v3_runtime
 
 
 def temporary_path() -> Path:
@@ -80,10 +82,16 @@ def main() -> int:
     subscribe_assistant.test_link_file_uses_subscription_rename_and_preserves_source(temporary_path())
     subscribe_assistant.test_link_file_without_custom_words_uses_original_relative_path(temporary_path())
     subscribe_assistant.test_download_temp_extensions_are_skipped()
+    v3_adaptation.test_v3_manifest_declares_adapted_subscription_plugins()
+    v3_adaptation.test_v2_manifest_blocks_old_contract_for_v3_plugins()
+    v3_adaptation.test_v3_sources_use_public_oper_and_sdk_paths()
+    v3_adaptation.test_v3_subscription_event_payload_accepts_typed_objects()
+    v3_adaptation.test_cross_version_emby_actor_metadata_is_not_capped_below_v3()
+    v3_runtime.test_v3_event_payload_accepts_model_dump_object()
+    v3_runtime.test_v3_matching_does_not_use_bare_legacy_ids_when_media_pairs_differ()
     print("All unit, security, rendering, realtime, capacity-control, actor, and subscription-assistant tests passed.")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -1,0 +1,1 @@
+@echo off & cd /d "%~dp0" & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\one-click-publish.ps1" & echo. & echo PowerShell finished. Review the output above. & echo Press any key to close this window... & pause >nul

@@ -89,7 +89,7 @@
     "author": "g-steven037",
     "level": 2,
     "v2": true,
-    "system_version": ">=2.14.4,<3",
+    "system_version": ">=2.14.4",
     "history": {
       "v0.2.1": "修复豆瓣字段解析：具体饰演角色位于character，roles主要是演员等职业类型；改为优先读取并清洗character，仅在缺失时使用兼容字段，同时记录角色字段来源统计",
       "v0.2.0": "按实际需求改为角色名中文化：保持演员Name不变，通过演员中文名或唯一拉丁名对应豆瓣演员，将豆瓣角色信息写入Emby People.Role；增加中文角色、身份匹配、无角色及歧义统计，并继续支持预览、验证和失败回滚",
@@ -106,6 +106,7 @@
     "author": "g-steven037",
     "level": 1,
     "v2": true,
+    "v3": false,
     "system_version": ">=2.14.4,<3",
     "history": {
       "v0.3.1": "插件显示名称由订阅助手（识别词硬链接）调整为识别词硬链接；插件ID SubscribeLinkRenamer、配置前缀和目录保持不变，更新后原配置不会丢失",
@@ -124,6 +125,7 @@
     "author": "g-steven037",
     "level": 1,
     "v2": true,
+    "v3": false,
     "system_version": ">=2.14.4,<3",
     "history": {
       "v0.3.1": "修复订阅汇总集数不准确和标题重复：已更新集数改为读取当天真实下载历史的seasons/episodes并按订阅合并，不再使用累计note；未更新组不显示误导性累计集数，通知标题改为订阅汇总",

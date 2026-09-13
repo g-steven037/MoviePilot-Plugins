@@ -1,0 +1,40 @@
+{
+  "VarietySubscribeAssistant": {
+    "name": "订阅助手",
+    "description": "为新增订阅应用媒体类型、类别、包含/排除关键词和规则组策略，并按Cron发送电视剧更新汇总，仅自用测试。",
+    "labels": "订阅,规则组,关键词,更新,通知",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/subscribe-assistant.svg",
+    "author": "g-steven037",
+    "level": 1,
+    "v3": true,
+    "system_version": ">=3.0.0",
+    "history": {
+      "v1.0.0": "适配MoviePilot V3：使用公开订阅、订阅历史和下载历史Oper，移除宿主Model及私有会话访问；兼容类型化订阅事件载荷，并统一使用media_source与media_id媒体身份对",
+      "v0.3.1": "修复订阅汇总集数不准确和标题重复：已更新集数改为读取当天真实下载历史的seasons/episodes并按订阅合并，不再使用累计note；未更新组不显示误导性累计集数，通知标题改为订阅汇总",
+      "v0.3.0": "删除追剧排期、媒体服务器、TMDB和SQLite缓存模块；订阅汇总改为电视剧更新格式，按实际已下载集生成SxxExx区间；通知范围改为可多选的全部、未更新、已更新",
+      "v0.2.1": "修复MoviePilot安装后静默跳过加载：内部追剧日历类改为私有别名，避免入口类扫描优先误认DramaCalendar，确保正确加载VarietySubscribeAssistant",
+      "v0.2.0": "合并追剧更新日历并兼容迁移旧配置；新增电影/电视剧/全部类型、可选媒体类别、包含与排除关键词、多规则组下拉设置；新增Cron每日订阅汇总，可选择未完成、今日已完成或全部订阅，并支持立即发送测试",
+      "v0.1.0": "首次发布：监听新增订阅事件，识别综艺分类后自动将包含规则设为正片、过滤规则组设为日常观影；使用唯一ID VarietySubscribeAssistant，避免与市场现有SubscribeAssistant冲突"
+    }
+  },
+  "SubscribeLinkRenamer": {
+    "name": "识别词硬链接",
+    "description": "基于实时硬链接，只读使用现有订阅中的自定义识别词重命名目标文件；未命中时保持原名，仅自用测试。",
+    "labels": "订阅,识别词,实时监控,硬链接,重命名",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/subscribe-assistant.svg",
+    "author": "g-steven037",
+    "level": 1,
+    "v3": true,
+    "system_version": ">=3.0.0",
+    "history": {
+      "v1.0.0": "适配MoviePilot V3：改用公开订阅Oper、app.sdk.media.WordsMatcher与app.sdk.utilities.SystemUtils，避免旧数据库和内部工具路径",
+      "v0.3.1": "插件显示名称由订阅助手（识别词硬链接）调整为识别词硬链接；插件ID SubscribeLinkRenamer、配置前缀和目录保持不变，更新后原配置不会丢失",
+      "v0.3.0": "修复与现有市场插件SubscribeAssistant发生ID冲突而被高版本覆盖：使用唯一插件ID SubscribeLinkRenamer，并同步迁移类名和插件目录",
+      "v0.2.1": "修复插件市场不可见：移除不必要的站点认证限制，将市场与运行权限调整为所有MoviePilot管理员可见",
+      "v0.2.0": "删除规则创建、订阅自动修改和自定义规则面板；核心目录监控改为复用官方实时硬链接的watchfiles快速/兼容模式、全量同步、排除关键词及小文件复制逻辑；只读汇总现有订阅custom_words并使用MoviePilot原生WordsMatcher转换目标文件名，未命中或歧义时保持原名",
+      "v0.1.0": "首次发布：以结构化行配置PT名称/季与订阅名称/季映射，新增订阅后自动写入搜索关键词、包含规则和自定义识别词；实时监控下载目录，结合下载器状态及文件稳定性确认完成后按同一规则改名硬链接，源文件只读、冲突不覆盖、变化自动撤销并重新等待"
+    }
+  }
+}

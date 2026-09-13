@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import threading
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 from apscheduler.triggers.cron import CronTrigger
 
-from app.core.config import settings
-from app.core.event import Event, eventmanager
-from app.db.subscribe_oper import SubscribeOper
-from app.log import logger
+from app.sdk.config import settings
+from app.sdk.events import Event, eventmanager
+from app.db.oper.subscribe import SubscribeOper
+from app.db.oper.subscribehistory import SubscribeHistoryOper
+from app.db.oper.downloadhistory import DownloadHistoryOper
+from app.sdk.logging import logger
 from app.plugins import _PluginBase
-from app.schemas.types import EventType, NotificationType
+from app.schemas.types import EventType, MediaType, NotificationType
 
 def _integer(value: Any, default: int = 0) -> int:
     try:
@@ -89,11 +92,7 @@ def _identity_candidates(record: Any) -> List[Tuple[str, str]]:
     source = str(getattr(record, "media_source", "") or "").strip().casefold()
     media_id = str(getattr(record, "media_id", "") or "").strip()
     if source and media_id:
-        candidates.append((f"source:{source}", media_id))
-    for field_name in ("tmdbid", "doubanid", "bangumiid", "anilistid"):
-        value = str(getattr(record, field_name, "") or "").strip()
-        if value:
-            candidates.append((field_name, value))
+        candidates.append(("media", f"{source}:{media_id}"))
     name = _record_name(record).casefold()
     year = str(getattr(record, "year", "") or "").strip()
     if name:
@@ -101,12 +100,43 @@ def _identity_candidates(record: Any) -> List[Tuple[str, str]]:
     return candidates
 
 
+def _media_identity(record: Any) -> Tuple[str, str] | None:
+    source = str(getattr(record, "media_source", "") or "").strip().casefold()
+    media_id = str(getattr(record, "media_id", "") or "").strip()
+    return (source, media_id) if source and media_id else None
+
+
 def _match_subscription(record: Any, subscriptions: Sequence[Any]) -> Any:
-    identities = set(_identity_candidates(record))
+    identity = _media_identity(record)
+    title_key = dict(_identity_candidates(record)).get("title")
     for subscription in subscriptions:
-        if identities.intersection(_identity_candidates(subscription)):
+        subscription_identity = _media_identity(subscription)
+        if identity and subscription_identity:
+            if identity == subscription_identity:
+                return subscription
+            continue
+        if title_key and title_key == dict(_identity_candidates(subscription)).get("title"):
             return subscription
     return None
+
+
+def _event_payload(value: Any) -> Dict[str, Any]:
+    """将 V2 字典和 V3 类型化事件快照统一为普通字典。"""
+    if isinstance(value, Mapping):
+        return dict(value)
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            result = model_dump(mode="python")
+        except TypeError:
+            result = model_dump()
+        return dict(result) if isinstance(result, Mapping) else {}
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        result = to_dict()
+        return dict(result) if isinstance(result, Mapping) else {}
+    values = getattr(value, "__dict__", None)
+    return dict(values) if isinstance(values, Mapping) else {}
 
 
 def _updated_items(
@@ -235,7 +265,7 @@ class VarietySubscribeAssistant(_PluginBase):
     plugin_name = "订阅助手"
     plugin_desc = "为新增订阅应用类型、关键词和规则组策略，并按Cron发送电视剧更新汇总。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/subscribe-assistant.svg"
-    plugin_version = "0.3.1"
+    plugin_version = "1.0.0"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "varietysubscribeassistant_"
@@ -382,14 +412,13 @@ class VarietySubscribeAssistant(_PluginBase):
     @eventmanager.register(EventType.SubscribeAdded)
     def apply_variety_policy(self, event: Event):
         """兼容旧方法名，为符合范围的新增订阅应用统一规则。"""
-        if (
-            not self._enabled
-            or not self._rule_enabled
-            or not event
-            or not isinstance(event.event_data, dict)
-        ):
+        if not self._enabled or not self._rule_enabled or not event:
             return
-        raw_sid = event.event_data.get("subscribe_id")
+        event_data = _event_payload(getattr(event, "event_data", None))
+        if not event_data:
+            logger.warning("#订阅助手# 新增订阅事件载荷无效，已跳过 [INVALID_EVENT_PAYLOAD]")
+            return
+        raw_sid = event_data.get("subscribe_id")
         try:
             sid = int(raw_sid)
         except (TypeError, ValueError):
@@ -401,7 +430,7 @@ class VarietySubscribeAssistant(_PluginBase):
             if not subscribe:
                 logger.warning(f"#订阅助手# 未找到新增订阅，已跳过 | 订阅ID={sid}")
                 return
-            if not self._matches_policy(event.event_data, subscribe):
+            if not self._matches_policy(event_data, subscribe):
                 return
             payload = {
                 "include": self._include,
@@ -429,8 +458,8 @@ class VarietySubscribeAssistant(_PluginBase):
             logger.info(
                 f"#订阅助手# 已应用新增订阅规则 | 订阅ID={sid} | "
                 f"名称={self._safe_name(getattr(subscribe, 'name', ''))} | "
-                f"类型={self._event_media_type(event.event_data, subscribe)} | "
-                f"类别={self._event_category(event.event_data, subscribe) or '未分类'} | "
+                f"类型={self._event_media_type(event_data, subscribe)} | "
+                f"类别={self._event_category(event_data, subscribe) or '未分类'} | "
                 f"包含={self._include or '无'} | 排除={self._exclude or '无'} | "
                 f"规则组={','.join(self._filter_groups) or '无'}"
             )
@@ -454,22 +483,18 @@ class VarietySubscribeAssistant(_PluginBase):
 
     def _completed_today(self, now: datetime) -> List[Any]:
         try:
-            from app.db.models.subscribehistory import SubscribeHistory
+            from app.schemas.query import QueryPageRequest, SubscriptionHistoryFilter
 
-            oper = SubscribeOper()
-            db = getattr(oper, "_db", None)
-            if db is None:
-                raise RuntimeError("SUBSCRIBE_DB_UNAVAILABLE")
+            oper = SubscribeHistoryOper()
             result: List[Any] = []
             for page in range(1, 6):
-                batch = SubscribeHistory.list_by_type(
-                    db, mtype="电视剧", page=page, count=200
-                ) or []
+                batch, total = oper.query(
+                    SubscriptionHistoryFilter(media_types=(MediaType.TV,)),
+                    QueryPageRequest(page=page, count=200),
+                )
+                batch = batch or []
                 result.extend(item for item in batch if self._is_today(item, now))
-                if len(batch) < 200:
-                    break
-                oldest = str(getattr(batch[-1], "date", "") or "")
-                if oldest and oldest[:10] < now.strftime("%Y-%m-%d"):
+                if not batch or page * 200 >= total:
                     break
             return result
         except Exception as exc:
@@ -480,14 +505,20 @@ class VarietySubscribeAssistant(_PluginBase):
 
     def _downloads_today(self, now: datetime) -> List[Any]:
         try:
-            from app.db.downloadhistory_oper import DownloadHistoryOper
+            from app.schemas.query import DownloadHistoryFilter, QueryPageRequest
 
-            return [
-                item for item in (
-                    DownloadHistoryOper().list_by_type("电视剧", days=1) or []
+            oper = DownloadHistoryOper()
+            result: List[Any] = []
+            for page in range(1, 6):
+                batch, total = oper.query(
+                    DownloadHistoryFilter(media_types=(MediaType.TV,)),
+                    QueryPageRequest(page=page, count=200),
                 )
-                if self._is_today(item, now)
-            ]
+                batch = batch or []
+                result.extend(item for item in batch if self._is_today(item, now))
+                if not batch or page * 200 >= total:
+                    break
+            return result
         except Exception as exc:
             logger.warning(
                 f"#订阅助手# 读取当天下载历史失败 [{type(exc).__name__.upper()}]"
