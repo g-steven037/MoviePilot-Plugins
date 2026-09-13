@@ -87,6 +87,7 @@ def main() -> int:
     v3_adaptation.test_v3_sources_use_public_oper_and_sdk_paths()
     v3_adaptation.test_v3_subscription_event_payload_accepts_typed_objects()
     v3_adaptation.test_cross_version_emby_actor_metadata_is_not_capped_below_v3()
+    v3_adaptation.test_p115_rapid_retry_has_a_v3_entry_and_v3_source()
     v3_runtime.test_v3_event_payload_accepts_model_dump_object()
     v3_runtime.test_v3_matching_does_not_use_bare_legacy_ids_when_media_pairs_differ()
     print("All unit, security, rendering, realtime, capacity-control, actor, and subscription-assistant tests passed.")

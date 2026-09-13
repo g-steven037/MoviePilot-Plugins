@@ -60,3 +60,23 @@ def test_v3_subscription_event_payload_accepts_typed_objects():
 def test_cross_version_emby_actor_metadata_is_not_capped_below_v3():
     manifest = _read_json("package.v2.json")
     assert "<3" not in manifest["EmbyActorChinese"]["system_version"]
+
+
+def test_p115_rapid_retry_has_a_v3_entry_and_v3_source():
+    v2_manifest = _read_json("package.v2.json")
+    v3_manifest = _read_json("package.v3.json")
+    assert v2_manifest["P115RapidRetry"]["v3"] is False
+    entry = v3_manifest["P115RapidRetry"]
+    assert entry["v3"] is True
+    assert entry["system_version"] == ">=3.0.0"
+    assert entry["version"].split(".")[0] == "2"
+    assert entry["history"]
+
+    source_path = ROOT / "plugins.v3/p115rapidretry/__init__.py"
+    source = source_path.read_text(encoding="utf-8")
+    assert 'plugin_version = "2.0.0"' in source
+    assert "from app.sdk.config import settings" in source
+    assert "from app.sdk.logging import logger" in source
+    assert "from app.sdk.media import MetaInfoPath" in source
+    assert "from app.core.config import settings" not in source
+    assert "from app.log import logger" not in source
