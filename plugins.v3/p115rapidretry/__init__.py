@@ -26,7 +26,7 @@ from app.sdk.logging import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType
 
-from .cms import CmsClient, cms_batch_due, cms_retry_delay
+from .cms import CmsClient, cms_delay_remaining
 from .rapid import FileIdentity, RapidResult, same_identity, secure_identity, try_rapid_upload
 SAFE_CODES = {
     "RAPID_SUCCESS", "RAPID_MISS", "AUTH_FAILED", "RATE_LIMITED",
@@ -65,7 +65,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "监控目录，秒传失败时转移到临时目录并定时重试；秒传成功后可触发 CMS 增量整理。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "2.0.3"
+    plugin_version = "2.1.0"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
@@ -100,6 +100,9 @@ class P115RapidRetry(_PluginBase):
     _cms_mode = "auto_organize"
     _cms_delay_seconds = 60
     _cms_client: Optional[CmsClient] = None
+    _cms_timer: Optional[threading.Timer] = None
+    _cms_timer_lock = threading.Lock()
+    _cms_call_lock = threading.Lock()
     _client: Optional[P115Client] = None
     _observer: Optional[Observer] = None
     _worker: Optional[threading.Thread] = None
@@ -231,6 +234,8 @@ class P115RapidRetry(_PluginBase):
             self._start_realtime_monitor(queue_existing=False)
             if self._empty_cleanup_enabled and bool(self.get_data("empty_cleanup_pending")):
                 self._empty_cleanup_pending.set()
+            if self._cms_enabled and self._cms_client and self._cms_pending_items():
+                self._schedule_cms_sync()
             if run_selected_retry_once:
                 self._put_control_event("retry_selected")
             if run_retry_once:
@@ -518,14 +523,6 @@ class P115RapidRetry(_PluginBase):
             "func": self.retry_exhausted_pending,
             "kwargs": {},
         })
-        if self._cms_enabled and self._cms_client:
-            services.append({
-                "id": "P115RapidRetry_cms_sync",
-                "name": "115秒传成功后CMS自动整理",
-                "trigger": CronTrigger.from_crontab("* * * * *"),
-                "func": self.cms_sync_pending,
-                "kwargs": {},
-            })
         if self._empty_cleanup_enabled:
             services.append({
                 "id": "P115RapidRetry_empty_cleanup",
@@ -1077,71 +1074,77 @@ class P115RapidRetry(_PluginBase):
             "key": key,
             "name": path.name,
             "created_at": time(),
-            "attempts": 0,
-            "next_retry_at": 0,
         })
         self.save_data("cms_pending", pending[-1000:])
+        self._schedule_cms_sync()
         logger.info(
             f"#115秒传# 已加入CMS整理队列 | 文件={self._safe_log_value(path.name)} | "
             f"延迟={self._cms_delay_seconds}秒"
         )
 
-    def cms_sync_pending(self):
-        """Flush successful rapid-upload items to CMS independently of 115 retries."""
+    def _schedule_cms_sync(self):
         if not self._cms_enabled or not self._cms_client:
             return
         pending = self._cms_pending_items()
         if not pending:
             return
-        now = time()
-        if not cms_batch_due(pending, now=now, delay=self._cms_delay_seconds):
+        delay = cms_delay_remaining(pending, delay=self._cms_delay_seconds)
+        with self._cms_timer_lock:
+            if self._cms_timer:
+                self._cms_timer.cancel()
+            timer = threading.Timer(delay, self.cms_sync_pending)
+            timer.daemon = True
+            self._cms_timer = timer
+            timer.start()
+
+    def cms_sync_pending(self):
+        """Trigger CMS once after a quiet delay; CMS owns subsequent scheduling."""
+        with self._cms_timer_lock:
+            self._cms_timer = None
+        if not self._cms_enabled or not self._cms_client:
             return
-        due = [
-            item for item in pending
-            if now >= float(item.get("next_retry_at", 0) or 0)
-        ]
-        if not due:
+        pending = self._cms_pending_items()
+        if not pending:
             return
-        success, code = self._cms_client.sync()
-        keys = {self._cms_item_key(item) for item in due}
-        current = self._cms_pending_items()
-        if success:
+        if cms_delay_remaining(pending, delay=self._cms_delay_seconds) > 0:
+            self._schedule_cms_sync()
+            return
+        if not self._cms_call_lock.acquire(blocking=False):
+            self._schedule_cms_sync()
+            return
+        try:
+            snapshot = self._cms_pending_items()
+            if not snapshot:
+                return
+            now = time()
+            success, code = self._cms_client.sync()
+            keys = {self._cms_item_key(item) for item in snapshot}
+            current = self._cms_pending_items()
             remaining = [item for item in current if self._cms_item_key(item) not in keys]
             self.save_data("cms_pending", remaining)
-            completed = self.get_data("cms_completed") or {}
-            if not isinstance(completed, dict):
-                completed = {}
-            completed.update({key: now for key in keys})
-            if len(completed) > 1000:
-                completed = dict(sorted(completed.items(), key=lambda item: float(item[1]))[-1000:])
-            self.save_data("cms_completed", completed)
-            logger.info(
-                f"#115秒传# CMS整理触发成功 | 文件数={len(due)} | "
-                f"模式={self._cms_mode} | 响应={code}"
-            )
-            return
+            if success:
+                completed = self.get_data("cms_completed") or {}
+                if not isinstance(completed, dict):
+                    completed = {}
+                completed.update({key: now for key in keys})
+                if len(completed) > 1000:
+                    completed = dict(sorted(completed.items(), key=lambda item: float(item[1]))[-1000:])
+                self.save_data("cms_completed", completed)
+                logger.info(
+                    f"#115秒传# CMS整理触发成功 | 文件数={len(snapshot)} | "
+                    f"模式={self._cms_mode} | 响应={code}"
+                )
+                return
 
-        updated = []
-        for item in current:
-            if self._cms_item_key(item) not in keys:
-                updated.append(item)
-                continue
-            refreshed = dict(item)
-            attempts = max(int(refreshed.get("attempts", 0) or 0), 0) + 1
-            refreshed.update({
-                "attempts": attempts,
-                "next_retry_at": now + cms_retry_delay(attempts),
-                "last_error": code,
-            })
-            updated.append(refreshed)
-        self.save_data("cms_pending", updated)
-        diagnostic = getattr(self._cms_client, "last_error", "") or code
-        target = getattr(self._cms_client, "safe_description", "CMS_ENDPOINT")
-        logger.warning(
-            f"#115秒传# CMS整理失败，已独立排队重试 | 文件数={len(due)} | "
-            f"下次延迟={cms_retry_delay(max(int(due[0].get('attempts', 0) or 0) + 1, 1))}秒 | "
-            f"代码={code} | 诊断={diagnostic} | 目标={target}"
-        )
+            diagnostic = getattr(self._cms_client, "last_error", "") or code
+            target = getattr(self._cms_client, "safe_description", "CMS_ENDPOINT")
+            logger.warning(
+                f"#115秒传# CMS整理触发失败 | 文件数={len(snapshot)} | "
+                f"代码={code} | 诊断={diagnostic} | 目标={target} | "
+                "插件不再独立重试，由CMS内部计划负责后续整理"
+            )
+        finally:
+            self._cms_call_lock.release()
 
     def _send_bot_success(
         self,
@@ -1557,7 +1560,7 @@ class P115RapidRetry(_PluginBase):
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "empty_cleanup_enabled", "label": "定时清理空文件夹"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "exhausted_policy", "label": "重试耗尽处理", "items": [{"title": "保留文件（推荐）", "value": "keep"}, {"title": "删除文件及空文件夹", "value": "delete"}], "clearable": False}}]},
         ]})
-        content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "info", "variant": "tonal", "text": "CMS整理会在秒传成功后延迟触发；CMS地址必须能扫描115目标目录，CMS失败会独立重试，不影响秒传状态。"}}]}]})
+        content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "info", "variant": "tonal", "text": "CMS整理会在秒传成功后按秒级延迟触发；CMS地址必须能扫描115目标目录，CMS失败不会影响秒传状态，后续整理交由CMS内部计划。"}}]}]})
         # Failed files are retried by the configured cron after reaching the
         # maximum attempt count; no manual multi-select control is exposed.
         for model, label, field_type in fields:
@@ -1748,6 +1751,10 @@ class P115RapidRetry(_PluginBase):
 
     def stop_service(self):
         self._enabled = False
+        with self._cms_timer_lock:
+            if self._cms_timer:
+                self._cms_timer.cancel()
+                self._cms_timer = None
         if self._observer:
             self._observer.stop()
             self._observer.join(timeout=10)

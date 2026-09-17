@@ -68,10 +68,10 @@ class CmsClient:
             request = Request(
                 self.request_url,
                 method="GET",
-                headers={"User-Agent": "MoviePilot-P115RapidRetry/2.0.3"},
+                headers={"User-Agent": "MoviePilot-P115RapidRetry/2.1.0"},
             )
             stage = "open"
-            with self._opener(request, self.timeout) as response:
+            with self._opener(request, timeout=self.timeout) as response:
                 stage = "response_status"
                 status = int(getattr(response, "status", 200))
                 stage = "response_read"
@@ -93,16 +93,17 @@ class CmsClient:
             return False, "CLIENT_ERROR"
 
 
-def cms_batch_due(items: Iterable[dict], *, now: float | None = None, delay: int = 60) -> bool:
+def cms_delay_remaining(
+    items: Iterable[dict], *, now: float | None = None, delay: int = 60
+) -> float:
     pending = [item for item in items if isinstance(item, dict)]
     if not pending:
-        return False
+        return 0
     latest = max(float(item.get("created_at", 0) or 0) for item in pending)
     current = time() if now is None else float(now)
-    return current >= latest + max(int(delay), 0)
+    return max(latest + max(int(delay), 0) - current, 0.0)
 
 
-def cms_retry_delay(attempt: int) -> int:
-    """Return an independent CMS retry delay; cap retries at one hour."""
-    number = max(int(attempt), 1)
-    return min(60 * (2 ** (number - 1)), 3600)
+def cms_batch_due(items: Iterable[dict], *, now: float | None = None, delay: int = 60) -> bool:
+    pending = [item for item in items if isinstance(item, dict)]
+    return bool(pending) and cms_delay_remaining(pending, now=now, delay=delay) == 0
