@@ -35,7 +35,7 @@ SAFE_CODES = {
     "PATH_OUTSIDE_ROOT", "LINK_OR_REPARSE_POINT", "NOT_REGULAR_FILE",
     "NOT_A_HARDLINK", "INVALID_FILE", "CIRCUIT_OPEN", "MOVE_FAILED",
     "DELETE_FAILED", "QUEUE_OVERFLOW", "RETRY_EXHAUSTED",
-    "HOURLY_LIMIT", "CONSECUTIVE_FAILURES",
+    "HOURLY_LIMIT", "CONSECUTIVE_FAILURES", "HOURLY_WAIT",
 }
 
 
@@ -65,7 +65,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "监控目录，秒传失败时转移到临时目录并定时重试；秒传成功后可触发 CMS 增量整理。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "2.1.0"
+    plugin_version = "2.2.0"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
@@ -78,7 +78,8 @@ class P115RapidRetry(_PluginBase):
     _protected_pt_dir = Path()
     _target_pid = "0"
     _cron = "*/10 * * * *"
-    _exhausted_cron = "0 * * * *"
+    _exhausted_cron = "0 * * * *"  # kept for backwards-compatible config migration
+    _exhausted_retry_interval = 3600
     _stable_seconds = 10
     _max_batch = 10
     _max_retries = 10
@@ -103,6 +104,8 @@ class P115RapidRetry(_PluginBase):
     _cms_timer: Optional[threading.Timer] = None
     _cms_timer_lock = threading.Lock()
     _cms_call_lock = threading.Lock()
+    _exhausted_timer: Optional[threading.Timer] = None
+    _exhausted_timer_lock = threading.Lock()
     _client: Optional[P115Client] = None
     _observer: Optional[Observer] = None
     _worker: Optional[threading.Thread] = None
@@ -163,8 +166,9 @@ class P115RapidRetry(_PluginBase):
         try:
             self._cron = str(config.get("cron", "*/10 * * * *")).strip()
             CronTrigger.from_crontab(self._cron)
+            # Legacy exhausted_cron is intentionally ignored. Exhausted files
+            # now use a per-file persisted one-hour deadline.
             self._exhausted_cron = str(config.get("exhausted_cron", "0 * * * *")).strip()
-            CronTrigger.from_crontab(self._exhausted_cron)
             self._stable_seconds = self._bounded_int(config.get("stable_seconds", 10), 1, 3600)
             self._max_batch = self._bounded_int(config.get("max_batch", 10), 1, 100)
             # A file is considered exhausted only after at least ten attempts.
@@ -232,6 +236,7 @@ class P115RapidRetry(_PluginBase):
                 config["manual_retry_files"] = []
                 self.update_config(config)
             self._start_realtime_monitor(queue_existing=False)
+            self._schedule_exhausted_retry()
             if self._empty_cleanup_enabled and bool(self.get_data("empty_cleanup_pending")):
                 self._empty_cleanup_pending.set()
             if self._cms_enabled and self._cms_client and self._cms_pending_items():
@@ -516,13 +521,6 @@ class P115RapidRetry(_PluginBase):
             "func": self.retry_pending,
             "kwargs": {},
         }]
-        services.append({
-            "id": "P115RapidRetry_exhausted_retry",
-            "name": "115秒传重试耗尽文件定时重试",
-            "trigger": CronTrigger.from_crontab(self._exhausted_cron),
-            "func": self.retry_exhausted_pending,
-            "kwargs": {},
-        })
         if self._empty_cleanup_enabled:
             services.append({
                 "id": "P115RapidRetry_empty_cleanup",
@@ -680,12 +678,12 @@ class P115RapidRetry(_PluginBase):
             state = pruned
             eligible = [
                 path for path in files
-                if not bool(state.get(self._task_id(path, self._retry_dir), {}).get("exhausted", False))
+                if self._retry_phase(state.get(self._task_id(path, self._retry_dir), {})) == "normal"
             ]
             exhausted_cleanup = [
                 path for path in files
                 if self._delete_exhausted_enabled
-                and bool(state.get(self._task_id(path, self._retry_dir), {}).get("exhausted", False))
+                and self._retry_phase(state.get(self._task_id(path, self._retry_dir), {})) == "final"
             ]
             if self._detailed_logs:
                 submitted = min(len(eligible) + len(exhausted_cleanup), self._max_batch)
@@ -697,8 +695,9 @@ class P115RapidRetry(_PluginBase):
             for path in files:
                 task_id = self._task_id(path, self._retry_dir)
                 task_state = state.get(task_id, {})
-                if bool(task_state.get("exhausted", False)):
-                    if self._delete_exhausted_enabled:
+                phase = self._retry_phase(task_state)
+                if phase != "normal":
+                    if phase == "final" and self._delete_exhausted_enabled:
                         self._delete_previously_exhausted(path, task_id, task_state)
                         processed += 1
                         if processed >= self._max_batch:
@@ -714,46 +713,45 @@ class P115RapidRetry(_PluginBase):
             self._operation_lock.release()
 
     def retry_exhausted_pending(self):
-        """Retry only files that reached the maximum attempts on a separate Cron."""
-        if not self._enabled or not self._client or self._auth_blocked or time() < self._circuit_until:
+        """Retry due files in the separate, persisted hourly exhaustion cycle."""
+        if not self._enabled or not self._client:
+            return
+        if self._auth_blocked or time() < self._circuit_until:
+            self._schedule_exhausted_retry(minimum_delay=60)
             return
         if not self._operation_lock.acquire(blocking=False):
-            logger.info("#115秒传# 耗尽文件定时重试延后：当前有文件正在处理")
+            logger.info("#115秒传# 耗尽文件重试延后：当前有文件正在处理")
+            self._schedule_exhausted_retry(minimum_delay=5)
             return
         try:
-            state = self.get_data("retry_state") or {}
+            now = time()
+            state = self._migrate_exhausted_retry_state(now)
             files = self._secure_files(self._retry_dir)
             exhausted = [
                 path for path in files
-                if bool(state.get(self._task_id(path, self._retry_dir), {}).get("exhausted", False))
+                if self._retry_phase(state.get(self._task_id(path, self._retry_dir), {})) == "hourly"
+                and self._retry_due(state.get(self._task_id(path, self._retry_dir), {}), now)
             ]
             if not exhausted:
-                logger.info("#115秒传# 耗尽文件定时重试完成 | 待重试=0")
                 return
             processed = 0
             for path in exhausted[:self._max_batch]:
                 task_id = self._task_id(path, self._retry_dir)
                 task_state = state.get(task_id, {})
-                if self._delete_exhausted_enabled:
-                    self._delete_previously_exhausted(path, task_id, task_state)
-                else:
-                    refreshed = dict(task_state)
-                    refreshed.update({"attempts": 0, "exhausted": False, "last_retry": 0})
-                    state[task_id] = refreshed
-                    self.save_data("retry_state", state)
-                    logger.info(
-                        f"#115秒传# 耗尽文件进入新重试周期 | 文件={self._safe_log_value(path.name)} | "
-                        f"上周期次数={task_state.get('attempts', self._max_retries)}/{self._max_retries}"
-                    )
-                    self._handle(path, self._retry_dir, None, from_retry=True)
+                logger.info(
+                    f"#115秒传# 耗尽文件开始每小时重试 | 文件={self._safe_log_value(path.name)} | "
+                    f"本周期次数={int(task_state.get('hourly_attempts', 0)) + 1}/10"
+                )
+                self._handle(path, self._retry_dir, None, from_retry=True)
                 processed += 1
                 if self._auth_blocked or time() < self._circuit_until:
                     break
             logger.info(
-                f"#115秒传# 耗尽文件定时重试完成 | 发现={len(exhausted)} | 本轮处理={processed}"
+                f"#115秒传# 耗尽文件每小时重试完成 | 到期={len(exhausted)} | 本轮处理={processed}"
             )
         finally:
             self._operation_lock.release()
+            self._schedule_exhausted_retry()
 
     def retry_selected_failed(self, selected_ids: set[str]):
         """Retry explicitly selected failed files once without resetting their retry state."""
@@ -844,7 +842,13 @@ class P115RapidRetry(_PluginBase):
         source = "重试" if from_retry else "后台线程"
         filename = self._safe_log_value(path.name)
         retry_state = (self.get_data("retry_state") or {}).get(task_id, {})
-        attempt_no = int(retry_state.get("attempts", 0)) + 1 if from_retry else 0
+        retry_phase = self._retry_phase(retry_state) if from_retry else "normal"
+        attempt_base = (
+            int(retry_state.get("hourly_attempts", 0))
+            if retry_phase == "hourly"
+            else int(retry_state.get("attempts", 0))
+        )
+        attempt_no = attempt_base + 1 if from_retry else 0
         if self._detailed_logs:
             logger.info(f"#115秒传# [{source}-{threading.current_thread().name}] {'重试秒传' if from_retry else '开始秒传'}: {filename}")
         if self._auth_blocked or time() < self._circuit_until:
@@ -914,37 +918,49 @@ class P115RapidRetry(_PluginBase):
         if from_retry:
             if result.code == "CIRCUIT_OPEN":
                 return
-            attempts, exhausted = self._schedule_retry(task_id, result.code)
-            if exhausted:
-                self._record(task_id, False, "RETRY_EXHAUSTED")
-                deleted = False
-                if self._delete_exhausted_enabled and identity:
-                    deleted = self._verified_unlink(path, identity, root)
-                if deleted:
-                    self._clear_retry_state(task_id)
-                    self._sha1_cache.pop(identity, None)
-                    if self._detailed_logs:
-                        logger.warning(
-                            f"#115秒传# 已达到最大重试次数({attempts}/{self._max_retries})，"
-                            f"已安全删除失败文件: {filename}"
-                        )
-                    else:
-                        logger.warning(
-                            f"#115秒传# [简短] 重试耗尽清理=已删除 | 文件={filename} | "
-                            f"重试次数={attempts}/{self._max_retries}"
-                        )
-                    self._remove_empty_parent_dirs(path.parent, root)
-                else:
-                    cleanup_state = "安全校验失败，文件已保留" if self._delete_exhausted_enabled else "文件已保留"
+            if retry_phase == "hourly":
+                attempts, final_exhausted = self._schedule_hourly_retry(task_id, result.code)
+                if not final_exhausted:
+                    self._record(task_id, False, result.code, path=path, attempts=attempts)
                     logger.warning(
-                        f"#115秒传# {'已达到最大重试次数' if self._detailed_logs else '[简短] 重试已达上限'}"
-                        f"({attempts}/{self._max_retries})，停止自动重试，{cleanup_state}: {filename}"
+                        f"#115秒传# 每小时重试未命中 | 文件={filename} | "
+                        f"本周期次数={attempts}/10 | 下次重试=1小时后"
                     )
-                self._send_bot_exhausted(
-                    path, attempts, result.code,
-                    deleted=deleted,
-                    delete_requested=self._delete_exhausted_enabled,
+                    return
+            else:
+                attempts, exhausted = self._schedule_retry(task_id, result.code)
+                if not exhausted:
+                    return
+                self._record(task_id, False, "HOURLY_WAIT")
+                self._enter_hourly_retry_cycle(task_id, result.code)
+                logger.warning(
+                    f"#115秒传# 普通重试已耗尽 | 文件={filename} | "
+                    f"普通周期={attempts}/{self._max_retries} | 下次重试=1小时后 | "
+                    "已进入独立耗尽周期"
                 )
+                return
+
+            self._record(task_id, False, "RETRY_EXHAUSTED")
+            logger.warning(
+                f"#115秒传# 每小时重试已耗尽 | 文件={filename} | "
+                f"耗尽周期={attempts}/10 | 已停止自动重试"
+            )
+            deleted = False
+            if self._delete_exhausted_enabled and identity:
+                deleted = self._verified_unlink(path, identity, root)
+            if deleted:
+                self._clear_retry_state(task_id)
+                self._sha1_cache.pop(identity, None)
+                logger.warning(f"#115秒传# 两个重试周期均失败，已安全删除失败文件: {filename}")
+                self._remove_empty_parent_dirs(path.parent, root)
+            else:
+                cleanup_state = "安全校验失败，文件已保留" if self._delete_exhausted_enabled else "文件已保留"
+                logger.warning(f"#115秒传# 两个重试周期均失败，{cleanup_state}: {filename}")
+            self._send_bot_exhausted(
+                path, attempts, result.code,
+                deleted=deleted,
+                delete_requested=self._delete_exhausted_enabled,
+            )
             return
         if not result.retryable or not identity or not same_identity(path, identity, root):
             return
@@ -1020,12 +1036,106 @@ class P115RapidRetry(_PluginBase):
             value = "invalid"
         return sha256(value.encode("utf-8")).hexdigest()[:16]
 
+    @staticmethod
+    def _retry_phase(task_state: Any) -> str:
+        if not isinstance(task_state, dict):
+            return "normal"
+        phase = str(task_state.get("phase", "")).strip().lower()
+        if phase in {"hourly", "final"}:
+            return phase
+        # State written by versions before the hourly-cycle state machine used
+        # exhausted=True as the only marker. Treat it as hourly during migration.
+        return "hourly" if bool(task_state.get("exhausted", False)) else "normal"
+
+    @staticmethod
+    def _retry_due(task_state: Any, now: float) -> bool:
+        if not isinstance(task_state, dict):
+            return False
+        try:
+            due = float(task_state.get("next_retry_at", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            due = 0.0
+        return due <= now
+
+    def _migrate_exhausted_retry_state(self, now: Optional[float] = None):
+        """Convert legacy exhausted flags into the persisted hourly-cycle state."""
+        now = time() if now is None else float(now)
+        state = self.get_data("retry_state") or {}
+        if not isinstance(state, dict):
+            return {}
+        changed = False
+        migrated = dict(state)
+        for task_id, raw in state.items():
+            if not isinstance(raw, dict) or not bool(raw.get("exhausted", False)):
+                continue
+            item = dict(raw)
+            phase = str(item.get("phase", "")).strip().lower()
+            if phase not in {"hourly", "final"}:
+                item.update({
+                    "phase": "hourly",
+                    "hourly_attempts": 0,
+                    "next_retry_at": now + self._exhausted_retry_interval,
+                })
+                changed = True
+            elif phase == "hourly" and "next_retry_at" not in item:
+                item["next_retry_at"] = now + self._exhausted_retry_interval
+                item.setdefault("hourly_attempts", 0)
+                changed = True
+            migrated[task_id] = item
+        if changed:
+            self.save_data("retry_state", migrated)
+        return migrated
+
+    def _cancel_exhausted_retry_timer(self):
+        with self._exhausted_timer_lock:
+            if self._exhausted_timer:
+                self._exhausted_timer.cancel()
+                self._exhausted_timer = None
+
+    def _schedule_exhausted_retry(self, minimum_delay: float = 0.0):
+        """Schedule the earliest due hourly retry with a persisted exact deadline."""
+        if not self._enabled or self._retry_dir == Path():
+            self._cancel_exhausted_retry_timer()
+            return
+        now = time()
+        state = self._migrate_exhausted_retry_state(now)
+        try:
+            active_ids = {
+                self._task_id(path, self._retry_dir)
+                for path in self._secure_files(self._retry_dir)
+            }
+        except (OSError, ValueError):
+            active_ids = set()
+        due_times = []
+        for task_id, item in state.items():
+            if task_id not in active_ids:
+                continue
+            if self._retry_phase(item) != "hourly":
+                continue
+            try:
+                due_times.append(float(item.get("next_retry_at", 0) or 0))
+            except (TypeError, ValueError, OverflowError):
+                due_times.append(now)
+        if not due_times:
+            self._cancel_exhausted_retry_timer()
+            return
+        delay = max(min(due_times) - now, float(minimum_delay or 0.0))
+        with self._exhausted_timer_lock:
+            if self._exhausted_timer:
+                self._exhausted_timer.cancel()
+            timer = threading.Timer(delay, self.retry_exhausted_pending)
+            timer.daemon = True
+            self._exhausted_timer = timer
+            timer.start()
+
     def _initialize_retry(self, task_id: str, code: str):
         state = self.get_data("retry_state") or {}
         state[task_id] = {
             "attempts": 0,
             "code": self._normalize_code(code),
             "exhausted": False,
+            "phase": "normal",
+            "hourly_attempts": 0,
         }
         self.save_data("retry_state", state)
 
@@ -1038,9 +1148,46 @@ class P115RapidRetry(_PluginBase):
             "attempts": attempts,
             "code": self._normalize_code(code),
             "exhausted": exhausted,
+            "phase": "normal" if not exhausted else "hourly",
+            "hourly_attempts": 0,
+            "next_retry_at": (
+                time() + self._exhausted_retry_interval if exhausted else 0
+            ),
         }
         self.save_data("retry_state", state)
         return attempts, exhausted
+
+    def _schedule_hourly_retry(self, task_id: str, code: str) -> Tuple[int, bool]:
+        state = self.get_data("retry_state") or {}
+        previous = state.get(task_id, {})
+        hourly_attempts = min(int(previous.get("hourly_attempts", 0)) + 1, 1000)
+        final = hourly_attempts >= 10
+        updated = dict(previous)
+        updated.update({
+            "code": self._normalize_code(code),
+            "exhausted": True,
+            "phase": "final" if final else "hourly",
+            "hourly_attempts": hourly_attempts,
+            "next_retry_at": 0 if final else time() + self._exhausted_retry_interval,
+        })
+        state[task_id] = updated
+        self.save_data("retry_state", state)
+        return hourly_attempts, final
+
+    def _enter_hourly_retry_cycle(self, task_id: str, code: str):
+        state = self.get_data("retry_state") or {}
+        previous = dict(state.get(task_id, {}))
+        previous.update({
+            "code": self._normalize_code(code),
+            "attempts": self._max_retries,
+            "exhausted": True,
+            "phase": "hourly",
+            "hourly_attempts": 0,
+            "next_retry_at": time() + self._exhausted_retry_interval,
+        })
+        state[task_id] = previous
+        self.save_data("retry_state", state)
+        self._schedule_exhausted_retry()
 
     def _clear_retry_state(self, task_id: str):
         state = self.get_data("retry_state") or {}
@@ -1295,7 +1442,7 @@ class P115RapidRetry(_PluginBase):
             return "成功"
         if normalized == "RETRY_EXHAUSTED":
             return "已停止"
-        if normalized in {"RAPID_MISS", "HOURLY_LIMIT"}:
+        if normalized in {"RAPID_MISS", "HOURLY_LIMIT", "HOURLY_WAIT"}:
             return "等待重试"
         if normalized == "CIRCUIT_OPEN":
             return "风控等待"
@@ -1536,7 +1683,6 @@ class P115RapidRetry(_PluginBase):
             ("retry_dir", "失败临时目录", None),
             ("target_pid", "115目标目录ID（根目录为0）", None),
             ("cron", "临时目录普通失败重试 Cron（5段）", None),
-            ("exhausted_cron", "重试耗尽文件独立 Cron（5段）", None),
             ("stable_seconds", "文件稳定等待秒数（1-3600）", "number"),
             ("max_batch", "每轮最大重试文件数（1-100）", "number"),
             ("max_retries", "单文件最大重试次数（10-100）", "number"),
@@ -1560,7 +1706,7 @@ class P115RapidRetry(_PluginBase):
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "empty_cleanup_enabled", "label": "定时清理空文件夹"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "exhausted_policy", "label": "重试耗尽处理", "items": [{"title": "保留文件（推荐）", "value": "keep"}, {"title": "删除文件及空文件夹", "value": "delete"}], "clearable": False}}]},
         ]})
-        content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "info", "variant": "tonal", "text": "CMS整理会在秒传成功后按秒级延迟触发；CMS地址必须能扫描115目标目录，CMS失败不会影响秒传状态，后续整理交由CMS内部计划。"}}]}]})
+        content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "info", "variant": "tonal", "text": "CMS整理会在秒传成功后按秒级延迟触发；CMS地址必须能扫描115目标目录，CMS失败不会影响秒传状态，后续整理交由CMS内部计划。普通重试耗尽后，文件会按每小时一次进入第二个10次重试周期。"}}]}]})
         # Failed files are retried by the configured cron after reaching the
         # maximum attempt count; no manual multi-select control is exposed.
         for model, label, field_type in fields:
@@ -1613,10 +1759,17 @@ class P115RapidRetry(_PluginBase):
             except (OSError, ValueError):
                 continue
             attempts = min(max(int(task_state.get("attempts", 0)), 0), 1000)
+            hourly_attempts = min(max(int(task_state.get("hourly_attempts", 0)), 0), 10)
             code = self._normalize_code(str(task_state.get("code", "RAPID_MISS")))
-            retry_status = "已达上限" if bool(task_state.get("exhausted", False)) else "等待重试"
+            phase = self._retry_phase(task_state)
+            if phase == "hourly":
+                retry_status = f"每小时重试 {hourly_attempts}/10"
+            elif phase == "final":
+                retry_status = "已达最终上限"
+            else:
+                retry_status = "等待重试"
             items.append({
-                "title": f"{relative}（{attempts}次，{retry_status}，{code}）",
+                "title": f"{relative}（普通{attempts}次，{retry_status}，{code}）",
                 "value": task_id,
             })
             if len(items) >= 500:
@@ -1755,6 +1908,10 @@ class P115RapidRetry(_PluginBase):
             if self._cms_timer:
                 self._cms_timer.cancel()
                 self._cms_timer = None
+        with self._exhausted_timer_lock:
+            if self._exhausted_timer:
+                self._exhausted_timer.cancel()
+                self._exhausted_timer = None
         if self._observer:
             self._observer.stop()
             self._observer.join(timeout=10)
