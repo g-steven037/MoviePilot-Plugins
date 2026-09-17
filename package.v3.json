@@ -1,15 +1,16 @@
 {
   "P115RapidRetry": {
     "name": "115秒传重试",
-    "description": "监控目录，秒传失败时转移到临时目录并定时重试，秒传成功后删除本地文件。",
-    "labels": "网盘,115,秒传,重试",
-    "version": "2.0.0",
+    "description": "监控目录，秒传失败时转移到临时目录并定时重试；秒传成功后可触发CMS增量整理。",
+    "labels": "网盘,115,秒传,重试,CMS,自动整理",
+    "version": "2.0.1",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png",
     "author": "g-steven037",
     "level": 1,
     "v3": true,
     "system_version": ">=3.0.0",
     "history": {
+      "v2.0.1": "新增可选CMS自动整理：秒传成功后延迟批量调用CMS增量同步/自动整理接口；CMS失败独立退避重试，不影响115秒传状态，并增加去重与重启持久化队列",
       "v2.0.0": "适配MoviePilot V3：迁移配置、实时监控、115秒传重试和任务面板到V3专用入口，改用V3稳定SDK配置、日志和元信息接口；保留原有配置前缀和插件数据",
       "v1.2.0": "优化任务面板：增加总任务、成功、重试中和失败摘要，显示监控状态与最近记录；状态改用彩色标签，重试次数统一显示为当前次数/上限，增加无记录提示"
     }
