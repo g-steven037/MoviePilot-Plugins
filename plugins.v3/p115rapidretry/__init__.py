@@ -65,7 +65,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "监控目录，秒传失败时转移到临时目录并定时重试；秒传成功后可触发 CMS 增量整理。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "2.0.1"
+    plugin_version = "2.0.2"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
@@ -1135,9 +1135,12 @@ class P115RapidRetry(_PluginBase):
             })
             updated.append(refreshed)
         self.save_data("cms_pending", updated)
+        diagnostic = getattr(self._cms_client, "last_error", "") or code
+        target = getattr(self._cms_client, "safe_description", "CMS_ENDPOINT")
         logger.warning(
             f"#115秒传# CMS整理失败，已独立排队重试 | 文件数={len(due)} | "
-            f"下次延迟={cms_retry_delay(max(int(due[0].get('attempts', 0) or 0) + 1, 1))}秒 | 代码={code}"
+            f"下次延迟={cms_retry_delay(max(int(due[0].get('attempts', 0) or 0) + 1, 1))}秒 | "
+            f"代码={code} | 诊断={diagnostic} | 目标={target}"
         )
 
     def _send_bot_success(

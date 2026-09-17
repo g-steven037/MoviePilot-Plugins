@@ -45,6 +45,7 @@ class CmsClient:
         self.mode = _normalise_mode(mode)
         self.timeout = max(int(timeout), 1)
         self._opener = opener or urlopen
+        self._last_error = ""
 
     @property
     def request_url(self) -> str:
@@ -55,11 +56,17 @@ class CmsClient:
     def safe_description(self) -> str:
         return f"{self.domain}{CMS_ENDPOINT}?type={self.mode}"
 
+    @property
+    def last_error(self) -> str:
+        """Safe exception type only; never expose URL, token, or response text."""
+        return self._last_error
+
     def sync(self) -> tuple[bool, str]:
+        self._last_error = ""
         request = Request(
             self.request_url,
             method="GET",
-            headers={"User-Agent": "MoviePilot-P115RapidRetry/2.0.1"},
+            headers={"User-Agent": "MoviePilot-P115RapidRetry/2.0.2"},
         )
         try:
             with self._opener(request, self.timeout) as response:
@@ -69,12 +76,16 @@ class CmsClient:
                 return True, f"HTTP_{status}"
             return False, f"HTTP_{status}"
         except HTTPError as exc:
+            self._last_error = type(exc).__name__
             return False, f"HTTP_{int(exc.code)}"
         except TimeoutError:
+            self._last_error = "TimeoutError"
             return False, "TIMEOUT"
-        except OSError:
+        except OSError as exc:
+            self._last_error = type(exc).__name__
             return False, "NETWORK_ERROR"
-        except Exception:
+        except Exception as exc:
+            self._last_error = type(exc).__name__
             return False, "CLIENT_ERROR"
 
 
