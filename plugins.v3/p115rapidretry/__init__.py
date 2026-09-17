@@ -26,6 +26,7 @@ from app.sdk.logging import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType
 
+from .cms import CmsClient, cms_batch_due, cms_retry_delay
 from .rapid import FileIdentity, RapidResult, same_identity, secure_identity, try_rapid_upload
 SAFE_CODES = {
     "RAPID_SUCCESS", "RAPID_MISS", "AUTH_FAILED", "RATE_LIMITED",
@@ -62,9 +63,9 @@ class _WatchHandler(FileSystemEventHandler):
 
 class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
-    plugin_desc = "（仅自用）监控目录，秒传失败时转移到临时目录，定时重试，秒传成功后删除本地文件，仅自用测试。"
+    plugin_desc = "监控目录，秒传失败时转移到临时目录并定时重试；秒传成功后可触发 CMS 增量整理。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "2.0.0"
+    plugin_version = "2.0.1"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
@@ -93,6 +94,12 @@ class P115RapidRetry(_PluginBase):
     _empty_cleanup_roots: List[Path] = []
     _empty_cleanup_cron = "0 4 * * *"
     _empty_cleanup_identities: Dict[Path, Tuple[int, int]] = {}
+    _cms_enabled = False
+    _cms_domain = ""
+    _cms_api_token = ""
+    _cms_mode = "auto_organize"
+    _cms_delay_seconds = 60
+    _cms_client: Optional[CmsClient] = None
     _client: Optional[P115Client] = None
     _observer: Optional[Observer] = None
     _worker: Optional[threading.Thread] = None
@@ -141,6 +148,12 @@ class P115RapidRetry(_PluginBase):
         self._risk_notices = set()
         self._sha1_cache = {}
         self._tmdb_display_cache = {}
+        self._cms_enabled = False
+        self._cms_domain = ""
+        self._cms_api_token = ""
+        self._cms_mode = "auto_organize"
+        self._cms_delay_seconds = 60
+        self._cms_client = None
         if not self._enabled:
             return
 
@@ -171,6 +184,22 @@ class P115RapidRetry(_PluginBase):
             log_mode = str(config.get("log_mode", "")).strip().lower()
             self._detailed_logs = log_mode == "detailed" if log_mode in {"detailed", "brief"} else bool(config.get("detailed_logs", True))
             self._empty_cleanup_enabled = bool(config.get("empty_cleanup_enabled", False))
+            self._cms_enabled = bool(config.get("cms_enabled", False))
+            self._cms_domain = str(config.get("cms_domain", "")).strip().rstrip("/")
+            self._cms_api_token = str(config.get("cms_api_token", "")).strip()
+            self._cms_mode = str(config.get("cms_mode", "auto_organize")).strip().lower()
+            self._cms_delay_seconds = self._bounded_int(config.get("cms_delay_seconds", 60), 0, 3600)
+            if self._cms_enabled:
+                try:
+                    self._cms_client = CmsClient(
+                        self._cms_domain,
+                        self._cms_api_token,
+                        self._cms_mode,
+                    )
+                except (TypeError, ValueError) as exc:
+                    self._cms_enabled = False
+                    self._cms_client = None
+                    logger.error(f"#115秒传# CMS配置无效，已关闭CMS整理 | 代码={self._safe_code(exc)}")
             self._target_pid = self._validate_pid(str(config.get("target_pid", "0")).strip())
             self._watch_dir = self._prepare_path(config.get("watch_dir"), create=True)
             self._retry_dir = self._prepare_path(config.get("retry_dir"), create=True)
@@ -489,6 +518,14 @@ class P115RapidRetry(_PluginBase):
             "func": self.retry_exhausted_pending,
             "kwargs": {},
         })
+        if self._cms_enabled and self._cms_client:
+            services.append({
+                "id": "P115RapidRetry_cms_sync",
+                "name": "115秒传成功后CMS自动整理",
+                "trigger": CronTrigger.from_crontab("* * * * *"),
+                "func": self.cms_sync_pending,
+                "kwargs": {},
+            })
         if self._empty_cleanup_enabled:
             services.append({
                 "id": "P115RapidRetry_empty_cleanup",
@@ -852,6 +889,7 @@ class P115RapidRetry(_PluginBase):
         self._apply_risk_result(result)
 
         if result.success:
+            self._enqueue_cms_sync(path, result.sha1)
             if identity and self._verified_unlink(path, identity, root):
                 self._clear_retry_state(task_id)
                 self._sha1_cache.pop(identity, None)
@@ -1012,6 +1050,95 @@ class P115RapidRetry(_PluginBase):
         if task_id in state:
             state.pop(task_id, None)
             self.save_data("retry_state", state)
+
+    @staticmethod
+    def _cms_item_key(item: Dict[str, Any]) -> str:
+        return str(item.get("key", "")).strip()
+
+    def _cms_pending_items(self) -> List[Dict[str, Any]]:
+        value = self.get_data("cms_pending") or []
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, dict) and self._cms_item_key(item)]
+
+    def _enqueue_cms_sync(self, path: Path, sha1: Optional[str]):
+        if not self._cms_enabled or not self._cms_client or not sha1:
+            return
+        key = f"{str(sha1).upper()}:{self._target_pid}:{path.name}"
+        completed = self.get_data("cms_completed") or {}
+        if not isinstance(completed, dict):
+            completed = {}
+        if key in completed:
+            return
+        pending = self._cms_pending_items()
+        if any(self._cms_item_key(item) == key for item in pending):
+            return
+        pending.append({
+            "key": key,
+            "name": path.name,
+            "created_at": time(),
+            "attempts": 0,
+            "next_retry_at": 0,
+        })
+        self.save_data("cms_pending", pending[-1000:])
+        logger.info(
+            f"#115秒传# 已加入CMS整理队列 | 文件={self._safe_log_value(path.name)} | "
+            f"延迟={self._cms_delay_seconds}秒"
+        )
+
+    def cms_sync_pending(self):
+        """Flush successful rapid-upload items to CMS independently of 115 retries."""
+        if not self._cms_enabled or not self._cms_client:
+            return
+        pending = self._cms_pending_items()
+        if not pending:
+            return
+        now = time()
+        if not cms_batch_due(pending, now=now, delay=self._cms_delay_seconds):
+            return
+        due = [
+            item for item in pending
+            if now >= float(item.get("next_retry_at", 0) or 0)
+        ]
+        if not due:
+            return
+        success, code = self._cms_client.sync()
+        keys = {self._cms_item_key(item) for item in due}
+        current = self._cms_pending_items()
+        if success:
+            remaining = [item for item in current if self._cms_item_key(item) not in keys]
+            self.save_data("cms_pending", remaining)
+            completed = self.get_data("cms_completed") or {}
+            if not isinstance(completed, dict):
+                completed = {}
+            completed.update({key: now for key in keys})
+            if len(completed) > 1000:
+                completed = dict(sorted(completed.items(), key=lambda item: float(item[1]))[-1000:])
+            self.save_data("cms_completed", completed)
+            logger.info(
+                f"#115秒传# CMS整理触发成功 | 文件数={len(due)} | "
+                f"模式={self._cms_mode} | 响应={code}"
+            )
+            return
+
+        updated = []
+        for item in current:
+            if self._cms_item_key(item) not in keys:
+                updated.append(item)
+                continue
+            refreshed = dict(item)
+            attempts = max(int(refreshed.get("attempts", 0) or 0), 0) + 1
+            refreshed.update({
+                "attempts": attempts,
+                "next_retry_at": now + cms_retry_delay(attempts),
+                "last_error": code,
+            })
+            updated.append(refreshed)
+        self.save_data("cms_pending", updated)
+        logger.warning(
+            f"#115秒传# CMS整理失败，已独立排队重试 | 文件数={len(due)} | "
+            f"下次延迟={cms_retry_delay(max(int(due[0].get('attempts', 0) or 0) + 1, 1))}秒 | 代码={code}"
+        )
 
     def _send_bot_success(
         self,
@@ -1411,6 +1538,9 @@ class P115RapidRetry(_PluginBase):
             ("hourly_request_limit", "每小时最多115请求数（1-120）", "number"),
             ("consecutive_failure_limit", "连续技术失败熔断次数（2-20）", "number"),
             ("failure_cooldown_minutes", "连续失败暂停分钟数（10-1440）", "number"),
+            ("cms_domain", "CMS地址（例如 http://cms:3000）", None),
+            ("cms_api_token", "CMS API Token（密码框隐藏）", "password"),
+            ("cms_delay_seconds", "CMS成功后延迟整理秒数（0-3600）", "number"),
             ("empty_cleanup_root", "定时清理空文件夹根目录（每行一个绝对路径）", None),
             ("empty_cleanup_cron", "空文件夹清理 Cron（5段）", None),
         ]
@@ -1419,16 +1549,19 @@ class P115RapidRetry(_PluginBase):
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "插件启用"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "notify_mode", "label": "Bot通知策略", "items": [{"title": "关闭通知", "value": "none"}, {"title": "仅秒传成功", "value": "success"}, {"title": "仅失败（重试耗尽）", "value": "failure"}, {"title": "成功和失败", "value": "both"}], "clearable": False}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "log_mode", "label": "日志级别", "items": [{"title": "详细日志", "value": "detailed"}, {"title": "简短日志", "value": "brief"}], "clearable": False}}]},
+            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "cms_enabled", "label": "秒传成功后CMS自动整理"}}]},
+            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "cms_mode", "label": "CMS整理模式", "items": [{"title": "增量同步+自动整理", "value": "auto_organize"}, {"title": "仅增量同步", "value": "lift_sync"}], "clearable": False}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "empty_cleanup_enabled", "label": "定时清理空文件夹"}}]},
             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "exhausted_policy", "label": "重试耗尽处理", "items": [{"title": "保留文件（推荐）", "value": "keep"}, {"title": "删除文件及空文件夹", "value": "delete"}], "clearable": False}}]},
         ]})
+        content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "info", "variant": "tonal", "text": "CMS整理会在秒传成功后延迟触发；CMS地址必须能扫描115目标目录，CMS失败会独立重试，不影响秒传状态。"}}]}]})
         # Failed files are retried by the configured cron after reaching the
         # maximum attempt count; no manual multi-select control is exposed.
         for model, label, field_type in fields:
             props = {"model": model, "label": label, "clearable": False}
             if field_type:
                 props["type"] = field_type
-            if model == "cookie":
+            if model in {"cookie", "cms_api_token"}:
                 props["autocomplete"] = "new-password"
             component = "VTextField"
             if model == "empty_cleanup_root":
@@ -1444,7 +1577,8 @@ class P115RapidRetry(_PluginBase):
             "run_selected_retry_once": False, "manual_retry_files": [],
             "notify_mode": "none", "notify_enabled": False, "log_mode": "detailed", "detailed_logs": True,
             "exhausted_policy": "keep", "delete_exhausted_enabled": False,
-            "empty_cleanup_enabled": False, "cookie": "",
+            "empty_cleanup_enabled": False, "cms_enabled": False, "cms_domain": "", "cms_api_token": "",
+            "cms_mode": "auto_organize", "cms_delay_seconds": 60, "cookie": "",
             "protected_pt_dir": "", "watch_dir": "", "retry_dir": "", "target_pid": "0",
             "cron": "*/10 * * * *", "exhausted_cron": "0 * * * *", "stable_seconds": 10, "max_batch": 10, "max_retries": 10,
             "min_request_interval": 30, "hourly_request_limit": 30,
@@ -1624,3 +1758,4 @@ class P115RapidRetry(_PluginBase):
             self._worker.join(timeout=10)
         self._worker = None
         self._client = None
+        self._cms_client = None
