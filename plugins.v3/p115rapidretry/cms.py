@@ -63,29 +63,33 @@ class CmsClient:
 
     def sync(self) -> tuple[bool, str]:
         self._last_error = ""
-        request = Request(
-            self.request_url,
-            method="GET",
-            headers={"User-Agent": "MoviePilot-P115RapidRetry/2.0.2"},
-        )
+        stage = "request"
         try:
+            request = Request(
+                self.request_url,
+                method="GET",
+                headers={"User-Agent": "MoviePilot-P115RapidRetry/2.0.3"},
+            )
+            stage = "open"
             with self._opener(request, self.timeout) as response:
+                stage = "response_status"
                 status = int(getattr(response, "status", 200))
+                stage = "response_read"
                 response.read()
             if 200 <= status < 300:
                 return True, f"HTTP_{status}"
             return False, f"HTTP_{status}"
         except HTTPError as exc:
-            self._last_error = type(exc).__name__
+            self._last_error = f"{stage}:{type(exc).__name__}"
             return False, f"HTTP_{int(exc.code)}"
         except TimeoutError:
-            self._last_error = "TimeoutError"
+            self._last_error = f"{stage}:TimeoutError"
             return False, "TIMEOUT"
         except OSError as exc:
-            self._last_error = type(exc).__name__
+            self._last_error = f"{stage}:{type(exc).__name__}"
             return False, "NETWORK_ERROR"
         except Exception as exc:
-            self._last_error = type(exc).__name__
+            self._last_error = f"{stage}:{type(exc).__name__}"
             return False, "CLIENT_ERROR"
 
 
