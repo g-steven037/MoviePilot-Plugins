@@ -65,7 +65,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "监控目录，秒传失败时转移到临时目录并定时重试；秒传成功后可触发 CMS 增量整理。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "2.2.1"
+    plugin_version = "2.2.2"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
@@ -1732,54 +1732,123 @@ class P115RapidRetry(_PluginBase):
         return deleted
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        fields = [
-            ("cookie", "115 Cookie（明文，密码框隐藏）", "password"),
-            ("protected_pt_dir", "受保护的PT下载目录（不扫描）", None),
-            ("watch_dir", "硬链接实时监控目录", None),
-            ("retry_dir", "失败临时目录", None),
-            ("target_pid", "115目标目录ID（根目录为0）", None),
-            ("cron", "临时目录普通失败重试 Cron（5段）", None),
-            ("stable_seconds", "文件稳定等待秒数（1-3600）", "number"),
-            ("max_batch", "每轮最大重试文件数（1-100）", "number"),
-            ("max_retries", "单文件最大重试次数（10-100）", "number"),
-            ("min_request_interval", "115请求最小间隔秒数（5-300）", "number"),
-            ("hourly_request_limit", "每小时最多115请求数（1-120）", "number"),
-            ("consecutive_failure_limit", "连续技术失败熔断次数（2-20）", "number"),
-            ("failure_cooldown_minutes", "连续失败暂停分钟数（10-1440）", "number"),
-            ("cms_domain", "CMS地址（例如 http://cms:3000）", None),
-            ("cms_api_token", "CMS API Token（密码框隐藏）", "password"),
-            ("cms_delay_seconds", "CMS成功后延迟整理秒数（0-3600）", "number"),
-            ("empty_cleanup_root", "定时清理空文件夹根目录（每行一个绝对路径）", None),
-            ("empty_cleanup_cron", "空文件夹清理 Cron（5段）", None),
-        ]
-        content = [{"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "text": "Cookie 仅用于登录115官方接口，不发送给其他第三方，不写入插件日志或历史；MoviePilot 会将其保存在自身配置中，请保护管理端和数据目录。"}}]}]}]
-        content.append({"component": "VRow", "content": [
-            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "插件启用"}}]},
-            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "notify_mode", "label": "Bot通知策略", "items": [{"title": "关闭通知", "value": "none"}, {"title": "仅秒传成功", "value": "success"}, {"title": "仅失败（重试耗尽）", "value": "failure"}, {"title": "成功和失败", "value": "both"}], "clearable": False}}]},
-            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "log_mode", "label": "日志级别", "items": [{"title": "详细日志", "value": "detailed"}, {"title": "简短日志", "value": "brief"}], "clearable": False}}]},
-            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "cms_enabled", "label": "秒传成功后CMS自动整理"}}]},
-            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "cms_mode", "label": "CMS整理模式", "items": [{"title": "增量同步+自动整理", "value": "auto_organize"}, {"title": "仅增量同步", "value": "lift_sync"}], "clearable": False}}]},
-            {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "empty_cleanup_enabled", "label": "定时清理空文件夹"}}]},
-            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": "exhausted_policy", "label": "重试耗尽处理", "items": [{"title": "保留文件（推荐）", "value": "keep"}, {"title": "删除文件及空文件夹", "value": "delete"}], "clearable": False}}]},
-        ]})
-        content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "info", "variant": "tonal", "text": "CMS整理会在秒传成功后按秒级延迟触发；CMS地址必须能扫描115目标目录，CMS失败不会影响秒传状态，后续整理交由CMS内部计划。普通重试耗尽后，文件会按每小时一次进入第二个10次重试周期。"}}]}]})
-        # Failed files are retried by the configured cron after reaching the
-        # maximum attempt count; no manual multi-select control is exposed.
-        for model, label, field_type in fields:
-            props = {"model": model, "label": label, "clearable": False}
+        def col(component: str, props: Dict[str, Any], *, md: int | None = None) -> dict:
+            col_props: Dict[str, Any] = {"cols": 12}
+            if md:
+                col_props["md"] = md
+            return {"component": "VCol", "props": col_props, "content": [{"component": component, "props": props}]}
+
+        def row(*items: dict, show: str | None = None) -> dict:
+            props = {"class": "mb-1"}
+            if show:
+                props["show"] = show
+            return {"component": "VRow", "props": props, "content": list(items)}
+
+        def text_field(
+            model: str,
+            label: str,
+            field_type: str | None = None,
+            *,
+            md: int | None = None,
+            placeholder: str | None = None,
+            hint: str | None = None,
+            min_value: int | None = None,
+            max_value: int | None = None,
+            suffix: str | None = None,
+        ) -> dict:
+            props: Dict[str, Any] = {"model": model, "label": label, "clearable": False}
             if field_type:
                 props["type"] = field_type
             if model in {"cookie", "cms_api_token"}:
                 props["autocomplete"] = "new-password"
-            component = "VTextField"
-            if model == "empty_cleanup_root":
-                component = "VTextarea"
-                props.update({
-                    "rows": 3,
-                    "auto-grow": True,
-                    "placeholder": "/path/to/cleanup-root-1\n/path/to/cleanup-root-2",
-                })
-            content.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": component, "props": props}]}]})
+            if placeholder:
+                props["placeholder"] = placeholder
+            if hint:
+                props.update({"hint": hint, "persistentHint": True})
+            if min_value is not None:
+                props["min"] = min_value
+            if max_value is not None:
+                props["max"] = max_value
+            if suffix:
+                props["suffix"] = suffix
+            return col("VTextField", props, md=md)
+
+        def select_field(model: str, label: str, items: list[dict], *, md: int | None = None, show: str | None = None) -> dict:
+            props = {"model": model, "label": label, "items": items, "clearable": False}
+            return col("VSelect", props, md=md)
+
+        def switch_field(model: str, label: str, *, md: int | None = None) -> dict:
+            return col("VSwitch", {"model": model, "label": label}, md=md)
+
+        def panel(title: str, panel_content: list[dict]) -> dict:
+            return {
+                "component": "VExpansionPanel",
+                "content": [
+                    {"component": "VExpansionPanelTitle", "text": title},
+                    {"component": "VExpansionPanelText", "content": panel_content},
+                ],
+            }
+
+        notify_items = [
+            {"title": "关闭通知", "value": "none"},
+            {"title": "仅秒传成功", "value": "success"},
+            {"title": "仅失败（重试耗尽）", "value": "failure"},
+            {"title": "成功和失败", "value": "both"},
+        ]
+        cms_mode_items = [
+            {"title": "增量同步 + 自动整理", "value": "auto_organize"},
+            {"title": "仅增量同步", "value": "lift_sync"},
+        ]
+        exhausted_items = [
+            {"title": "保留文件（推荐）", "value": "keep"},
+            {"title": "删除文件及空文件夹", "value": "delete"},
+        ]
+        content = [
+            row(col("VAlert", {"type": "warning", "variant": "tonal", "density": "compact", "text": "Cookie 仅用于访问 115 官方接口，不会发送给其他服务。请保护 MoviePilot 管理端和数据目录。"})),
+            {"component": "VExpansionPanels", "props": {"multiple": True, "variant": "accordion"}, "content": [
+                panel("快速配置", [
+                    row(switch_field("enabled", "启用插件", md=4), text_field("target_pid", "115 目标目录 ID", md=8, hint="根目录填写 0")),
+                    row(text_field("cookie", "115 Cookie", "password", hint="用于秒传和转存，保存后会隐藏")),
+                    row(
+                        text_field("protected_pt_dir", "PT 下载目录（不扫描）", md=4, placeholder="/downloads/qb/"),
+                        text_field("watch_dir", "实时监控目录", md=4, placeholder="/downloads/media/"),
+                        text_field("retry_dir", "失败临时目录", md=4, placeholder="/downloads/sa_try/"),
+                    ),
+                ]),
+                panel("通知与 CMS", [
+                    row(select_field("notify_mode", "Bot 通知策略", notify_items, md=6), switch_field("cms_enabled", "秒传成功后 CMS 自动整理", md=6)),
+                    row(select_field("cms_mode", "CMS 整理模式", cms_mode_items, md=6), text_field("cms_delay_seconds", "CMS 延迟", "number", md=6, min_value=0, max_value=3600, suffix="秒"), show="{{cms_enabled}}"),
+                    row(text_field("cms_domain", "CMS 地址", md=6, placeholder="http://cms:9527"), text_field("cms_api_token", "CMS API Token", "password", md=6), show="{{cms_enabled}}"),
+                    row(col("VAlert", {"type": "info", "variant": "tonal", "density": "compact", "text": "已提交 CMS 只表示接口已接受请求，不代表媒体已经完成整理。"}), show="{{cms_enabled}}"),
+                ]),
+                panel("普通重试策略", [
+                    row(text_field("cron", "普通失败重试 Cron", md=6, placeholder="*/10 * * * *", hint="5 段 Cron；耗尽文件会自动进入每小时周期"), select_field("exhausted_policy", "重试耗尽处理", exhausted_items, md=6)),
+                    row(
+                        text_field("stable_seconds", "文件稳定等待", "number", md=3, min_value=1, max_value=3600, suffix="秒"),
+                        text_field("max_batch", "每轮最多处理", "number", md=3, min_value=1, max_value=100, suffix="个"),
+                        text_field("max_retries", "单文件最多重试", "number", md=3, min_value=10, max_value=100, suffix="次"),
+                    ),
+                ]),
+                panel("限流与安全", [
+                    row(
+                        text_field("min_request_interval", "115 请求最小间隔", "number", md=4, min_value=5, max_value=300, suffix="秒"),
+                        text_field("hourly_request_limit", "每小时最多请求", "number", md=4, min_value=1, max_value=120, suffix="次"),
+                        text_field("consecutive_failure_limit", "连续失败熔断", "number", md=4, min_value=2, max_value=20, suffix="次"),
+                    ),
+                    row(text_field("failure_cooldown_minutes", "熔断暂停", "number", md=4, min_value=10, max_value=1440, suffix="分钟")),
+                ]),
+                panel("空文件夹清理", [
+                    row(switch_field("empty_cleanup_enabled", "启用定时清理", md=4)),
+                    row(text_field("empty_cleanup_cron", "清理 Cron", md=8, placeholder="05 17 * * *"), show="{{empty_cleanup_enabled}}"),
+                    row(col("VTextarea", {"model": "empty_cleanup_root", "label": "清理根目录（每行一个绝对路径）", "rows": 3, "auto-grow": True, "placeholder": "/downloads/media"}), show="{{empty_cleanup_enabled}}"),
+                    row(col("VAlert", {"type": "warning", "variant": "tonal", "density": "compact", "text": "清理根目录不要包含 PT 下载目录、实时监控目录或失败临时目录。"}), show="{{empty_cleanup_enabled}}"),
+                ]),
+                panel("日志与诊断", [
+                    row(select_field("log_mode", "日志级别", [{"title": "简短日志", "value": "brief"}, {"title": "详细日志", "value": "detailed"}], md=6)),
+                    row(col("VAlert", {"type": "info", "variant": "tonal", "density": "compact", "text": "详细日志适合排查问题，稳定运行后可切换为简短日志。"})),
+                ]),
+            ]},
+        ]
         return [{"component": "VForm", "content": content}], {
             "enabled": False, "run_action": "none", "run_rapid_once": False, "run_retry_once": False,
             "run_selected_retry_once": False, "manual_retry_files": [],
