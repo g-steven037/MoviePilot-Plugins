@@ -65,7 +65,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "监控目录，秒传失败时转移到临时目录并定时重试；秒传成功后可触发 CMS 增量整理。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "2.2.0"
+    plugin_version = "2.2.1"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
@@ -890,7 +890,7 @@ class P115RapidRetry(_PluginBase):
         self._apply_risk_result(result)
 
         if result.success:
-            self._enqueue_cms_sync(path, result.sha1)
+            self._enqueue_cms_sync(path, result.sha1, task_id=task_id)
             if identity and self._verified_unlink(path, identity, root):
                 self._clear_retry_state(task_id)
                 self._sha1_cache.pop(identity, None)
@@ -1205,7 +1205,38 @@ class P115RapidRetry(_PluginBase):
             return []
         return [item for item in value if isinstance(item, dict) and self._cms_item_key(item)]
 
-    def _enqueue_cms_sync(self, path: Path, sha1: Optional[str]):
+    def _update_cms_history(
+        self,
+        task_id: str,
+        status: str,
+        *,
+        key: str = "",
+        code: str = "",
+        diagnostic: str = "",
+    ):
+        history = self.get_data("history") or []
+        if not isinstance(history, list):
+            return
+        task = str(task_id or "")[:16]
+        changed = False
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for item in history:
+            if not isinstance(item, dict) or item.get("task") != task:
+                continue
+            item["cms_status"] = status
+            if key:
+                item["cms_key"] = key
+            if code:
+                item["cms_code"] = self._normalize_code(code) if code in SAFE_CODES else self._safe_log_value(code, 64)
+            if diagnostic:
+                item["cms_diagnostic"] = self._safe_log_value(diagnostic, 128)
+            item["cms_time"] = now
+            changed = True
+            break
+        if changed:
+            self.save_data("history", history)
+
+    def _enqueue_cms_sync(self, path: Path, sha1: Optional[str], task_id: str = ""):
         if not self._cms_enabled or not self._cms_client or not sha1:
             return
         key = f"{str(sha1).upper()}:{self._target_pid}:{path.name}"
@@ -1213,16 +1244,23 @@ class P115RapidRetry(_PluginBase):
         if not isinstance(completed, dict):
             completed = {}
         if key in completed:
+            if task_id:
+                self._update_cms_history(task_id, "已提交CMS", key=key, code="HTTP_200")
             return
         pending = self._cms_pending_items()
         if any(self._cms_item_key(item) == key for item in pending):
+            if task_id:
+                self._update_cms_history(task_id, "等待CMS", key=key)
             return
         pending.append({
             "key": key,
             "name": path.name,
+            "task": str(task_id or "")[:16],
             "created_at": time(),
         })
         self.save_data("cms_pending", pending[-1000:])
+        if task_id:
+            self._update_cms_history(task_id, "等待CMS", key=key)
         self._schedule_cms_sync()
         logger.info(
             f"#115秒传# 已加入CMS整理队列 | 文件={self._safe_log_value(path.name)} | "
@@ -1277,6 +1315,12 @@ class P115RapidRetry(_PluginBase):
                 if len(completed) > 1000:
                     completed = dict(sorted(completed.items(), key=lambda item: float(item[1]))[-1000:])
                 self.save_data("cms_completed", completed)
+                for item in snapshot:
+                    task_id = str(item.get("task", ""))
+                    if task_id:
+                        self._update_cms_history(
+                            task_id, "已提交CMS", key=self._cms_item_key(item), code=code
+                        )
                 logger.info(
                     f"#115秒传# CMS整理触发成功 | 文件数={len(snapshot)} | "
                     f"模式={self._cms_mode} | 响应={code}"
@@ -1285,6 +1329,13 @@ class P115RapidRetry(_PluginBase):
 
             diagnostic = getattr(self._cms_client, "last_error", "") or code
             target = getattr(self._cms_client, "safe_description", "CMS_ENDPOINT")
+            for item in snapshot:
+                task_id = str(item.get("task", ""))
+                if task_id:
+                    self._update_cms_history(
+                        task_id, "提交失败", key=self._cms_item_key(item),
+                        code=code, diagnostic=diagnostic,
+                    )
             logger.warning(
                 f"#115秒传# CMS整理触发失败 | 文件数={len(snapshot)} | "
                 f"代码={code} | 诊断={diagnostic} | 目标={target} | "
@@ -1482,6 +1533,11 @@ class P115RapidRetry(_PluginBase):
             "success": bool(success),
             "status": self._task_status(success, code),
             "code": self._normalize_code(code),
+            "cms_status": str((previous or {}).get("cms_status", "")),
+            "cms_key": str((previous or {}).get("cms_key", "")),
+            "cms_code": str((previous or {}).get("cms_code", "")),
+            "cms_diagnostic": str((previous or {}).get("cms_diagnostic", "")),
+            "cms_time": str((previous or {}).get("cms_time", "")),
         }
         history = [entry for entry in history if entry.get("task") != task]
         history.insert(0, item)
@@ -1797,6 +1853,39 @@ class P115RapidRetry(_PluginBase):
             "failure": "error",
         }[cls._page_status_group(status)]
 
+    @classmethod
+    def _cms_page_status_color(cls, status: Any) -> str:
+        value = str(status or "未启用")
+        if value == "已提交CMS":
+            return "success"
+        if value in {"等待CMS", "未触发"}:
+            return "warning"
+        if value == "提交失败":
+            return "error"
+        return "info"
+
+    def _cms_page_status(self, item: Dict[str, Any]) -> str:
+        value = str(item.get("cms_status") or "").strip()
+        if value:
+            return value
+        return "未启用" if not self._cms_enabled else "未触发"
+
+    def _cms_page_summary(self, history: List[dict]) -> Dict[str, int]:
+        summary = {"waiting": 0, "submitted": 0, "failed": 0, "other": 0}
+        for item in history:
+            if not item.get("media"):
+                continue
+            status = self._cms_page_status(item)
+            if status == "等待CMS":
+                summary["waiting"] += 1
+            elif status == "已提交CMS":
+                summary["submitted"] += 1
+            elif status == "提交失败":
+                summary["failed"] += 1
+            else:
+                summary["other"] += 1
+        return summary
+
     def _page_summary(self, history: List[dict]) -> Dict[str, int]:
         summary = {"total": 0, "success": 0, "waiting": 0, "failure": 0}
         for item in history:
@@ -1811,6 +1900,7 @@ class P115RapidRetry(_PluginBase):
         if not isinstance(history, list):
             history = []
         summary = self._page_summary(history)
+        cms_summary = self._cms_page_summary(history)
         latest_time = next(
             (str(item.get("time")) for item in history if item.get("media") and item.get("time")),
             "暂无记录",
@@ -1827,7 +1917,7 @@ class P115RapidRetry(_PluginBase):
             "content": [
                 {
                     "component": "VCol",
-                    "props": {"cols": 12, "sm": 6, "md": 3},
+                    "props": {"cols": 6, "sm": 6, "md": 3},
                     "content": [{
                         "component": "VAlert",
                         "props": {
@@ -1840,6 +1930,26 @@ class P115RapidRetry(_PluginBase):
                 }
                 for label, count, color in summary_items
             ],
+        }
+        cms_state = "已启用" if self._cms_enabled else "未启用"
+        cms_status_row = {
+            "component": "VRow",
+            "content": [{
+                "component": "VCol",
+                "props": {"cols": 12},
+                "content": [{
+                    "component": "VAlert",
+                    "props": {
+                        "type": "info" if self._cms_enabled else "warning",
+                        "variant": "tonal",
+                        "density": "compact",
+                        "text": (
+                            f"CMS {cms_state} · 待提交 {cms_summary['waiting']} · "
+                            f"已提交 {cms_summary['submitted']} · 失败 {cms_summary['failed']}"
+                        ),
+                    },
+                }],
+            }],
         }
         status_row = {
             "component": "VRow",
@@ -1857,19 +1967,18 @@ class P115RapidRetry(_PluginBase):
                 }],
             }],
         }
-        rows = [
-            [
-                item.get("media"), item.get("episode"), item.get("attempts", 0),
-                item.get("status"), item.get("time"),
-            ]
-            for item in history if item.get("media")
-        ]
+        rows = [item for item in history if item.get("media")]
         table_content = [
-            {"component": "thead", "content": [{"component": "tr", "content": [{"component": "th", "text": title} for title in ("影视", "集数", "重试次数", "状态", "时间")]}]},
+            {"component": "thead", "content": [{"component": "tr", "content": [{"component": "th", "text": title} for title in ("影视", "集数", "重试次数", "秒传状态", "CMS状态", "时间")]}]},
             {"component": "tbody", "content": []},
         ]
-        for media, episode, attempts, status, item_time in rows:
-            status_text = str(status or "失败")
+        for item in rows:
+            media = item.get("media")
+            episode = item.get("episode")
+            attempts = item.get("attempts", 0)
+            status_text = str(item.get("status") or "失败")
+            cms_status = self._cms_page_status(item)
+            cms_detail = str(item.get("cms_diagnostic") or item.get("cms_time") or "")
             table_content[1]["content"].append({
                 "component": "tr",
                 "content": [
@@ -1885,13 +1994,46 @@ class P115RapidRetry(_PluginBase):
                         },
                         "text": status_text,
                     }]},
-                    {"component": "td", "text": str(item_time or "")},
+                    {"component": "td", "content": [{
+                        "component": "VChip",
+                        "props": {
+                            "color": self._cms_page_status_color(cms_status),
+                            "size": "small",
+                            "variant": "tonal",
+                        },
+                        "text": cms_status,
+                    }, {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": cms_detail}]},
+                    {"component": "td", "text": str(item.get("time") or "")},
                 ],
             })
-        table = {"component": "VTable", "props": {"hover": True, "density": "comfortable"}, "content": table_content}
-        page: List[dict] = [summary_row, status_row]
+        table = {"component": "VTable", "props": {"hover": True, "density": "comfortable", "class": "d-none d-sm-table"}, "content": table_content}
+        mobile_cards = {
+            "component": "VRow",
+            "props": {"class": "d-sm-none"},
+            "content": [],
+        }
+        for item in rows:
+            cms_status = self._cms_page_status(item)
+            mobile_cards["content"].append({
+                "component": "VCol",
+                "props": {"cols": 12},
+                "content": [{
+                    "component": "VCard",
+                    "props": {"variant": "tonal", "class": "mb-2"},
+                    "content": [{
+                        "component": "VCardText",
+                        "content": [
+                            {"component": "div", "props": {"class": "text-subtitle-1 font-weight-medium"}, "text": f"{item.get('media', '')} {item.get('episode', '-') }"},
+                            {"component": "div", "props": {"class": "text-body-2 mt-1"}, "text": f"重试 {item.get('attempts', 0)}/{self._max_retries} · {item.get('status', '失败')}"},
+                            {"component": "div", "props": {"class": "text-body-2 mt-1"}, "content": [{"component": "VChip", "props": {"color": self._cms_page_status_color(cms_status), "size": "small", "variant": "tonal"}, "text": f"CMS：{cms_status}"}]},
+                            {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-1"}, "text": str(item.get("cms_diagnostic") or item.get("cms_time") or item.get("time") or "")},
+                        ],
+                    }],
+                }],
+            })
+        page: List[dict] = [summary_row, cms_status_row, status_row]
         if rows:
-            page.append(table)
+            page.extend([table, mobile_cards])
         else:
             page.append({"component": "VAlert", "props": {"type": "info", "variant": "tonal", "text": "暂无秒传记录"}})
         return page
