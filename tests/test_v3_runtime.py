@@ -135,7 +135,7 @@ def test_v3_matching_does_not_use_bare_legacy_ids_when_media_pairs_differ():
 
 def test_v3_link_renamer_imports_with_sdk_contract():
     module = _load_renamer_v3()
-    assert module.SubscribeLinkRenamer.plugin_version == "1.1.2"
+    assert module.SubscribeLinkRenamer.plugin_version == "1.1.3"
 
 
 def test_v3_native_recognition_is_filename_only_and_has_no_file_side_effects():
@@ -190,6 +190,22 @@ def test_v3_recognition_test_api_returns_read_only_preview():
     assert response.data["file_operation"] == "none"
 
 
+def test_v3_recognition_test_api_accepts_page_bearer_without_query_token():
+    module = _load_renamer_v3()
+    module.settings.API_TOKEN = "test-token"
+    plugin = module.SubscribeLinkRenamer()
+
+    class ParsedMeta:
+        name = "示例"
+        season_episode = "S01 E01"
+        type = "电视剧"
+
+    module.MetaInfo = lambda title: ParsedMeta()
+    response = plugin.test_recognition(filename="Example.S01E01.mp4")
+    assert response.success is True
+    assert response.data["file_operation"] == "none"
+
+
 def test_v3_form_exposes_read_only_recognition_test_input():
     module = _load_renamer_v3()
     plugin = module.SubscribeLinkRenamer()
@@ -206,5 +222,6 @@ def test_v3_form_exposes_read_only_recognition_button():
     form, _ = plugin.get_form()
     serialized = str(form)
     assert "VBtn" in serialized
-    assert "开始只读测试（打开结果）" in serialized
-    assert "/api/v1/plugin/SubscribeLinkRenamer/test_recognition?filename={{ test_filename }}" in serialized
+    assert "开始只读测试" in serialized
+    assert "window.MoviePilotAPI.get('plugin/SubscribeLinkRenamer/test_recognition'" in serialized
+    assert "href" not in serialized
