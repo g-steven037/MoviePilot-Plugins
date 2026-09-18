@@ -143,7 +143,7 @@ class SubscribeLinkRenamer(_PluginBase):
     plugin_name = "识别词硬链接"
     plugin_desc = "基于实时硬链接，将订阅识别词或 MoviePilot 只读识别结果应用到目标文件名；识别失败时保持原名。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/subscribe-assistant.svg"
-    plugin_version = "1.1.2"
+    plugin_version = "1.1.3"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "subscribelinkrenamer_"
@@ -495,7 +495,9 @@ class SubscribeLinkRenamer(_PluginBase):
 
     def test_recognition(self, filename: str = "", apikey: str = "") -> schemas.Response:
         """只读预览 MP 识别结果，不创建、移动、复制或删除任何文件。"""
-        if apikey != settings.API_TOKEN:
+        # 页面调用由 MoviePilot 的 Bearer 中间件负责鉴权，不会把 API Token
+        # 作为查询参数传入；仅当外部显式传入 apikey 时校验它。
+        if apikey and apikey != settings.API_TOKEN:
             return schemas.Response(success=False, message="API密钥错误")
         value = str(filename or self._test_filename or "").strip()
         if not value:
@@ -572,7 +574,7 @@ class SubscribeLinkRenamer(_PluginBase):
                             "model": "test_filename",
                             "label": "只读识别测试文件名",
                             "placeholder": "例如：Kimi.ga.Shinu.made.Koi.wo.Shitai.S01E11.2026.1080p.mp4",
-                            "hint": "输入文件名后点击下方按钮，在新标签页查看识别结果；只返回预览，不操作文件。",
+                            "hint": "输入文件名后点击下方按钮查看识别结果；只返回预览，不操作文件。",
                             "persistentHint": True,
                         },
                     }]},
@@ -582,16 +584,16 @@ class SubscribeLinkRenamer(_PluginBase):
                         "color": "primary",
                         "variant": "tonal",
                         "block": True,
-                        "text": "开始只读测试（打开结果）",
-                        "href": "/api/v1/plugin/SubscribeLinkRenamer/test_recognition?filename={{ test_filename }}",
-                        "target": "_blank",
-                        "rel": "noopener",
+                        "text": "开始只读测试",
+                        # 通过宿主 API 客户端发起请求，自动携带当前页面的
+                        # Bearer 授权；不要使用 href，否则新标签页会丢失授权。
+                        "onclick": "function(e) { if (!model.test_filename) { alert('请输入文件名'); return } window.MoviePilotAPI.get('plugin/SubscribeLinkRenamer/test_recognition', {filename: model.test_filename}).then(function(r) { if (r && r.success === false) { alert(r.message || '识别失败') } else { alert((r && r.message) || JSON.stringify(r)) } }).catch(function(err) { console.error(err); alert('识别请求失败') }) }",
                     },
                 }]}]},
                 {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{
                     "component": "VAlert", "props": {
                         "type": "info", "variant": "tonal", "density": "compact",
-                        "text": "点击按钮后会在新标签页显示 JSON 识别结果；不会创建硬链接、移动、复制、删除或整理文件。",
+                        "text": "点击按钮后由 MoviePilot 页面 API 调用显示识别结果；不会创建硬链接、移动、复制、删除或整理文件。",
                     },
                 }]}]},
                 {"component": "VRow", "content": [
