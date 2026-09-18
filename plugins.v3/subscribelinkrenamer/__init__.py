@@ -141,9 +141,9 @@ class FileMonitorHandler:
 
 class SubscribeLinkRenamer(_PluginBase):
     plugin_name = "识别词硬链接"
-    plugin_desc = "基于实时硬链接，将订阅识别词或 MoviePilot 只读识别结果应用到目标文件名；识别失败时保持原名。"
+    plugin_desc = "基于实时硬链接，将订阅识别词或 MoviePilot 完整媒体识别结果应用到目标文件名；识别失败时保持原名。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/subscribe-assistant.svg"
-    plugin_version = "1.1.3"
+    plugin_version = "1.1.4"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "subscribelinkrenamer_"
@@ -163,6 +163,7 @@ class SubscribeLinkRenamer(_PluginBase):
     _size = 0.0
     _use_mp_recognition = False
     _test_filename = ""
+    _mp_recognition_cache: Dict[str, Tuple[str, Dict[str, str]]] = {}
     _dirconf: Dict[str, Path] = {}
     _subscription_words: Optional[List[Tuple[int, List[str]]]] = None
     _event = threading.Event()
@@ -317,23 +318,86 @@ class SubscribeLinkRenamer(_PluginBase):
         suffix = str(suffix or "")
         return f"{value}{suffix}"
 
-    def _native_renamed_filename(self, filename: str) -> str:
-        """调用 MP 纯文本识别器；此方法不得传入路径或执行文件操作。"""
+    @staticmethod
+    def _normalize_season_episode(value: str) -> str:
+        """统一季集显示格式，例如把 ``S01 E11`` 转成 ``S01E11``。"""
+        return re.sub(r"(?i)\bS(\d{1,3})\s+E", r"S\1E", str(value or "").strip())
+
+    def _complete_media_renamed_filename(self, filename: str) -> Tuple[str, Dict[str, str]]:
+        """调用 MoviePilot 完整媒体识别，仅生成文件名预览，不触碰文件系统。"""
+        cache = self.__dict__.setdefault("_mp_recognition_cache", {})
+        cached = cache.get(str(filename))
+        if cached is not None:
+            return cached[0], dict(cached[1])
+        parsed = MetaInfo(str(filename))
+        local_title = str(getattr(parsed, "name", "") or "").strip()
+        season_episode = self._normalize_season_episode(
+            str(getattr(parsed, "season_episode", "") or "").strip()
+        )
+        local_details: Dict[str, str] = {
+            "title": local_title,
+            "season_episode": season_episode,
+            "media_source": "",
+            "media_id": "",
+            "recognition_status": "LOCAL_PARSE",
+        }
+        target_title = local_title
         try:
-            parsed = MetaInfo(str(filename))
-            name = str(getattr(parsed, "name", "") or "").strip()
-            season_episode = str(getattr(parsed, "season_episode", "") or "").strip()
-            if not name:
-                return filename
-            parts = [name]
-            if season_episode:
-                parts.append(season_episode)
-            renamed = self._safe_native_filename(" ".join(parts), Path(filename).suffix)
-            if not renamed or renamed == filename or Path(renamed).name != renamed:
-                return filename
-            return renamed
+            # 延迟导入，避免宿主未提供识别链时影响插件加载；obtain_images=False
+            # 明确禁止图片获取及其相关副作用。
+            from app.chain.media import MediaChain
+
+            kwargs: Dict[str, Any] = {"obtain_images": False}
+            media_type = getattr(parsed, "type", None)
+            if media_type:
+                kwargs["mtype"] = media_type
+            mediainfo = MediaChain().recognize_by_meta(parsed, **kwargs)
+            if mediainfo:
+                target_title = str(
+                    getattr(mediainfo, "title", "")
+                    or getattr(mediainfo, "en_title", "")
+                    or local_title
+                ).strip() or local_title
+                local_details["title"] = target_title
+                source = getattr(mediainfo, "media_source", None)
+                if source is None:
+                    source = getattr(mediainfo, "source", None)
+                media_id = getattr(mediainfo, "media_id", None)
+                if media_id is None:
+                    media_id = getattr(mediainfo, "tmdb_id", None)
+                local_details.update({
+                    "media_source": str(getattr(source, "value", source) or ""),
+                    "media_id": str(media_id or ""),
+                    "recognition_status": "MP_FULL_RECOGNIZED",
+                })
         except Exception as exc:
-            logger.debug(f"#识别词硬链接# MP只读识别失败 | 文件={filename} | 代码={type(exc).__name__.upper()}")
+            getattr(logger, "debug", logger.info)(
+                f"#识别词硬链接# MP完整识别失败，回退文件名解析 | 文件={filename} | "
+                f"代码={type(exc).__name__.upper()}"
+            )
+
+        renamed = self._safe_native_filename(
+            " ".join(part for part in (target_title, season_episode) if part),
+            Path(filename).suffix,
+        )
+        if not renamed or Path(renamed).name != renamed:
+            renamed = filename
+        local_details["target_filename"] = renamed
+        local_details["recognized_title"] = target_title
+        if len(cache) >= 1024:
+            cache.clear()
+        cache[str(filename)] = (renamed, dict(local_details))
+        return renamed, local_details
+
+    def _native_renamed_filename(self, filename: str) -> str:
+        """调用 MP 完整媒体识别器；此方法只接收文件名，不执行文件操作。"""
+        try:
+            renamed, _ = self._complete_media_renamed_filename(filename)
+            return renamed if renamed != filename else filename
+        except Exception as exc:
+            getattr(logger, "debug", logger.info)(
+                f"#识别词硬链接# MP只读识别失败 | 文件={filename} | 代码={type(exc).__name__.upper()}"
+            )
             return filename
 
     @staticmethod
@@ -505,21 +569,24 @@ class SubscribeLinkRenamer(_PluginBase):
         if len(value) > 512 or any(char in value for char in ("/", "\\", "\x00", "\r", "\n")):
             return schemas.Response(success=False, message="测试内容必须是单个文件名，不能包含路径")
         try:
+            target, details = self._complete_media_renamed_filename(value)
             parsed = MetaInfo(value)
-            target = self._native_renamed_filename(value)
             media_type = getattr(parsed, "type", "")
             media_type = getattr(media_type, "value", media_type) or ""
             data = {
                 "source_filename": value,
                 "target_filename": target,
-                "title": str(getattr(parsed, "name", "") or ""),
-                "season_episode": str(getattr(parsed, "season_episode", "") or ""),
+                "title": details.get("title", ""),
+                "recognized_title": details.get("title", ""),
+                "season_episode": details.get("season_episode", ""),
                 "media_type": str(media_type),
-                "rename_status": "MP_NATIVE_RECOGNIZED" if target != value else "NO_MATCH",
+                "media_source": details.get("media_source", ""),
+                "media_id": details.get("media_id", ""),
+                "rename_status": details.get("recognition_status", "NO_MATCH"),
                 "file_operation": "none",
             }
             message = (
-                f"MP识别成功：标题={data['title'] or '未识别'} | "
+                f"MP识别成功：标题={data['recognized_title'] or '未识别'} | "
                 f"季集={data['season_episode'] or '未识别'} | "
                 f"预计名称={data['target_filename']} | 仅预览，未操作文件"
             )
@@ -558,13 +625,13 @@ class SubscribeLinkRenamer(_PluginBase):
                     {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{
                         "component": "VSwitch", "props": {
                             "model": "use_mp_recognition",
-                            "label": "MP 原生识别兜底重命名",
+                            "label": "MP 完整识别兜底重命名",
                         },
                     }]},
                     {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{
                         "component": "VAlert", "props": {
                             "type": "info", "variant": "tonal", "density": "compact",
-                            "text": "仅将文件名字符串交给 MP 识别；不会移动、复制、整理或刮削源文件。",
+                            "text": "未命中订阅识别词时调用 MP 完整媒体识别获取中文标题；不会移动、复制、整理或刮削源文件。",
                         },
                     }]},
                 ]},
@@ -632,7 +699,7 @@ class SubscribeLinkRenamer(_PluginBase):
                 {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{
                     "component": "VAlert", "props": {
                         "type": "info", "variant": "tonal",
-                        "text": "目标文件名优先尝试订阅自定义识别词；开启 MP 兜底后，仅对文件名字符串进行只读识别。识别失败或有歧义时保持原名。插件不会调用整理链，也不会修改源文件；小于最小硬链接大小的文件仍按官方逻辑复制到目标目录。",
+                        "text": "目标文件名优先尝试订阅自定义识别词；开启 MP 完整识别兜底后，仅对文件名字符串进行媒体匹配并生成预览。识别失败或有歧义时保持原名。插件不会调用整理链，也不会修改源文件；小于最小硬链接大小的文件仍按官方逻辑复制到目标目录。",
                     },
                 }]}]},
             ],
