@@ -26,7 +26,7 @@ from app.sdk.logging import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType
 
-from .cms import CmsClient, cms_delay_remaining
+from .cms import CmsClient, cms_delay_remaining, normalise_cms_delay
 from .rapid import FileIdentity, RapidResult, same_identity, secure_identity, try_rapid_upload
 SAFE_CODES = {
     "RAPID_SUCCESS", "RAPID_MISS", "AUTH_FAILED", "RATE_LIMITED",
@@ -65,7 +65,7 @@ class P115RapidRetry(_PluginBase):
     plugin_name = "115秒传重试"
     plugin_desc = "监控目录，秒传失败时转移到临时目录并定时重试；秒传成功后可触发 CMS 增量整理。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/v2/src/assets/images/misc/u115.png"
-    plugin_version = "2.2.2"
+    plugin_version = "2.2.3"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "p115rapidretry_"
@@ -195,7 +195,7 @@ class P115RapidRetry(_PluginBase):
             self._cms_domain = str(config.get("cms_domain", "")).strip().rstrip("/")
             self._cms_api_token = str(config.get("cms_api_token", "")).strip()
             self._cms_mode = str(config.get("cms_mode", "auto_organize")).strip().lower()
-            self._cms_delay_seconds = self._bounded_int(config.get("cms_delay_seconds", 60), 0, 3600)
+            self._cms_delay_seconds = normalise_cms_delay(config.get("cms_delay_seconds", 60))
             if self._cms_enabled:
                 try:
                     self._cms_client = CmsClient(
@@ -239,8 +239,6 @@ class P115RapidRetry(_PluginBase):
             self._schedule_exhausted_retry()
             if self._empty_cleanup_enabled and bool(self.get_data("empty_cleanup_pending")):
                 self._empty_cleanup_pending.set()
-            if self._cms_enabled and self._cms_client and self._cms_pending_items():
-                self._schedule_cms_sync()
             if run_selected_retry_once:
                 self._put_control_event("retry_selected")
             if run_retry_once:
@@ -521,6 +519,14 @@ class P115RapidRetry(_PluginBase):
             "func": self.retry_pending,
             "kwargs": {},
         }]
+        if self._cms_enabled and self._cms_client:
+            services.append({
+                "id": "P115RapidRetry_cms_sync",
+                "name": "115秒传 CMS 通知",
+                "trigger": CronTrigger.from_crontab("* * * * *"),
+                "func": self.cms_sync_pending,
+                "kwargs": {},
+            })
         if self._empty_cleanup_enabled:
             services.append({
                 "id": "P115RapidRetry_empty_cleanup",
@@ -1261,26 +1267,14 @@ class P115RapidRetry(_PluginBase):
         self.save_data("cms_pending", pending[-1000:])
         if task_id:
             self._update_cms_history(task_id, "等待CMS", key=key)
-        self._schedule_cms_sync()
         logger.info(
             f"#115秒传# 已加入CMS整理队列 | 文件={self._safe_log_value(path.name)} | "
             f"延迟={self._cms_delay_seconds}秒"
         )
 
     def _schedule_cms_sync(self):
-        if not self._cms_enabled or not self._cms_client:
-            return
-        pending = self._cms_pending_items()
-        if not pending:
-            return
-        delay = cms_delay_remaining(pending, delay=self._cms_delay_seconds)
-        with self._cms_timer_lock:
-            if self._cms_timer:
-                self._cms_timer.cancel()
-            timer = threading.Timer(delay, self.cms_sync_pending)
-            timer.daemon = True
-            self._cms_timer = timer
-            timer.start()
+        """Compatibility hook; CMS is checked by the shared minute service."""
+        return
 
     def cms_sync_pending(self):
         """Trigger CMS once after a quiet delay; CMS owns subsequent scheduling."""
@@ -1292,10 +1286,8 @@ class P115RapidRetry(_PluginBase):
         if not pending:
             return
         if cms_delay_remaining(pending, delay=self._cms_delay_seconds) > 0:
-            self._schedule_cms_sync()
             return
         if not self._cms_call_lock.acquire(blocking=False):
-            self._schedule_cms_sync()
             return
         try:
             snapshot = self._cms_pending_items()
@@ -1817,7 +1809,7 @@ class P115RapidRetry(_PluginBase):
                 ]),
                 panel("通知与 CMS", [
                     row(select_field("notify_mode", "Bot 通知策略", notify_items, md=6), switch_field("cms_enabled", "秒传成功后 CMS 自动整理", md=6)),
-                    row(select_field("cms_mode", "CMS 整理模式", cms_mode_items, md=6), text_field("cms_delay_seconds", "CMS 延迟", "number", md=6, min_value=0, max_value=3600, suffix="秒"), show="{{cms_enabled}}"),
+                    row(select_field("cms_mode", "CMS 整理模式", cms_mode_items, md=6), text_field("cms_delay_seconds", "CMS 静默等待（至少60秒）", "number", md=6, min_value=60, max_value=3600, suffix="秒"), show="{{cms_enabled}}"),
                     row(text_field("cms_domain", "CMS 地址", md=6, placeholder="http://cms:9527"), text_field("cms_api_token", "CMS API Token", "password", md=6), show="{{cms_enabled}}"),
                     row(col("VAlert", {"type": "info", "variant": "tonal", "density": "compact", "text": "已提交 CMS 只表示接口已接受请求，不代表媒体已经完成整理。"}), show="{{cms_enabled}}"),
                 ]),
