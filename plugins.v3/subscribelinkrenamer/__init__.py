@@ -143,7 +143,7 @@ class SubscribeLinkRenamer(_PluginBase):
     plugin_name = "识别词硬链接"
     plugin_desc = "基于实时硬链接，将订阅识别词或 MoviePilot 完整媒体识别结果应用到目标文件名；识别失败时保持原名。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/subscribe-assistant.svg"
-    plugin_version = "1.1.4"
+    plugin_version = "1.1.5"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "subscribelinkrenamer_"
@@ -340,8 +340,10 @@ class SubscribeLinkRenamer(_PluginBase):
             "media_source": "",
             "media_id": "",
             "recognition_status": "LOCAL_PARSE",
+            "naming_mode": "LOCAL_FALLBACK",
         }
         target_title = local_title
+        standard_filename = ""
         try:
             # 延迟导入，避免宿主未提供识别链时影响插件加载；obtain_images=False
             # 明确禁止图片获取及其相关副作用。
@@ -370,13 +372,36 @@ class SubscribeLinkRenamer(_PluginBase):
                     "media_id": str(media_id or ""),
                     "recognition_status": "MP_FULL_RECOGNIZED",
                 })
+                try:
+                    # MoviePilot 的标准命名器只计算目标路径，不执行任何文件操作。
+                    # 仅取返回路径的文件名，确保硬链接插件不会越权创建目录或移动文件。
+                    from app.modules.filemanager.module import FileManagerModule
+
+                    recommended = FileManagerModule.recommend_name(parsed, mediainfo)
+                    if recommended:
+                        recommended_text = str(recommended).replace("\\", "/")
+                        recommended_name = Path(recommended_text).name
+                        recommended_path = Path(recommended_name)
+                        recommended_suffix = recommended_path.suffix or Path(filename).suffix
+                        recommended_stem = recommended_path.stem
+                        standard_filename = self._safe_native_filename(
+                            recommended_stem,
+                            recommended_suffix,
+                        )
+                        if standard_filename:
+                            local_details["naming_mode"] = "MOVIEPILOT_STANDARD"
+                except Exception as exc:
+                    getattr(logger, "debug", logger.info)(
+                        f"#识别词硬链接# MP标准命名计算失败，回退标题命名 | 文件={filename} | "
+                        f"代码={type(exc).__name__.upper()}"
+                    )
         except Exception as exc:
             getattr(logger, "debug", logger.info)(
                 f"#识别词硬链接# MP完整识别失败，回退文件名解析 | 文件={filename} | "
                 f"代码={type(exc).__name__.upper()}"
             )
 
-        renamed = self._safe_native_filename(
+        renamed = standard_filename or self._safe_native_filename(
             " ".join(part for part in (target_title, season_episode) if part),
             Path(filename).suffix,
         )
@@ -639,9 +664,11 @@ class SubscribeLinkRenamer(_PluginBase):
                     {"component": "VCol", "props": {"cols": 12}, "content": [{
                         "component": "VTextField", "props": {
                             "model": "test_filename",
+                            "id": "subscribelinkrenamer-test-filename",
+                            "name": "subscribelinkrenamer-test-filename",
                             "label": "只读识别测试文件名",
                             "placeholder": "例如：Kimi.ga.Shinu.made.Koi.wo.Shitai.S01E11.2026.1080p.mp4",
-                            "hint": "输入文件名后点击下方按钮查看识别结果；只返回预览，不操作文件。",
+                            "hint": "无需保存配置，输入后即可测试；只返回预览，不操作文件。",
                             "persistentHint": True,
                         },
                     }]},
@@ -654,7 +681,7 @@ class SubscribeLinkRenamer(_PluginBase):
                         "text": "开始只读测试",
                         # 通过宿主 API 客户端发起请求，自动携带当前页面的
                         # Bearer 授权；不要使用 href，否则新标签页会丢失授权。
-                        "onclick": "function(e) { if (!model.test_filename) { alert('请输入文件名'); return } window.MoviePilotAPI.get('plugin/SubscribeLinkRenamer/test_recognition', {filename: model.test_filename}).then(function(r) { if (r && r.success === false) { alert(r.message || '识别失败') } else { alert((r && r.message) || JSON.stringify(r)) } }).catch(function(err) { console.error(err); alert('识别请求失败') }) }",
+                        "onclick": "function(e) { var input = document.querySelector('#subscribelinkrenamer-test-filename input') || document.getElementById('subscribelinkrenamer-test-filename'); var filename = input && typeof input.value === 'string' ? input.value.trim() : ''; if (!filename) { alert('请输入文件名'); return } window.MoviePilotAPI.get('plugin/SubscribeLinkRenamer/test_recognition', {filename: filename}).then(function(r) { if (r && r.success === false) { alert(r.message || '识别失败') } else { alert((r && r.message) || JSON.stringify(r)) } }).catch(function(err) { console.error(err); alert('识别请求失败') }) }",
                     },
                 }]}]},
                 {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{
