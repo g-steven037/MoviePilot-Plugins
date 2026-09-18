@@ -135,7 +135,7 @@ def test_v3_matching_does_not_use_bare_legacy_ids_when_media_pairs_differ():
 
 def test_v3_link_renamer_imports_with_sdk_contract():
     module = _load_renamer_v3()
-    assert module.SubscribeLinkRenamer.plugin_version == "1.1.1"
+    assert module.SubscribeLinkRenamer.plugin_version == "1.1.2"
 
 
 def test_v3_native_recognition_is_filename_only_and_has_no_file_side_effects():
@@ -198,3 +198,13 @@ def test_v3_form_exposes_read_only_recognition_test_input():
     assert "test_filename" in serialized
     assert "只读识别测试" in serialized
     assert defaults["test_filename"] == ""
+
+
+def test_v3_form_exposes_read_only_recognition_button():
+    module = _load_renamer_v3()
+    plugin = module.SubscribeLinkRenamer()
+    form, _ = plugin.get_form()
+    serialized = str(form)
+    assert "VBtn" in serialized
+    assert "开始只读测试（打开结果）" in serialized
+    assert "/api/v1/plugin/SubscribeLinkRenamer/test_recognition?filename={{ test_filename }}" in serialized
