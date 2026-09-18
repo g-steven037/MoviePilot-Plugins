@@ -74,7 +74,7 @@ def test_p115_rapid_retry_has_a_v3_entry_and_v3_source():
 
     source_path = ROOT / "plugins.v3/p115rapidretry/__init__.py"
     source = source_path.read_text(encoding="utf-8")
-    assert 'plugin_version = "2.2.2"' in source
+    assert 'plugin_version = "2.2.3"' in source
     assert "from app.sdk.config import settings" in source
     assert "from app.sdk.logging import logger" in source
     assert "from app.sdk.media import MetaInfoPath" in source
