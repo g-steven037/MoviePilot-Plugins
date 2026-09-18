@@ -1,0 +1,4 @@
+# Dependencies required by tests/run_all.py and the imported plugin test modules.
+-r ../plugins.v2/p115rapidretry/requirements.txt
+-r ../plugins.v2/embylibrarycover/requirements.txt
+fonttools>=4.55.0
