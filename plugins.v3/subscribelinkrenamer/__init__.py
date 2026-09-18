@@ -143,7 +143,7 @@ class SubscribeLinkRenamer(_PluginBase):
     plugin_name = "识别词硬链接"
     plugin_desc = "基于实时硬链接，将订阅识别词或 MoviePilot 完整媒体识别结果应用到目标文件名；识别失败时保持原名。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/subscribe-assistant.svg"
-    plugin_version = "1.1.5"
+    plugin_version = "1.1.6"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "subscribelinkrenamer_"
@@ -323,13 +323,27 @@ class SubscribeLinkRenamer(_PluginBase):
         """统一季集显示格式，例如把 ``S01 E11`` 转成 ``S01E11``。"""
         return re.sub(r"(?i)\bS(\d{1,3})\s+E", r"S\1E", str(value or "").strip())
 
+    @staticmethod
+    def _rename_format_cache_key(parsed: Any) -> str:
+        """读取当前 MP 命名模板，避免修改模板后继续命中旧缓存。"""
+        try:
+            from app.runtime.settings import get_runtime_setting
+
+            resolver = get_runtime_setting("RENAME_FORMAT")
+            if callable(resolver):
+                return str(resolver(getattr(parsed, "type", None)) or "")
+            return str(resolver or "")
+        except Exception:
+            return ""
+
     def _complete_media_renamed_filename(self, filename: str) -> Tuple[str, Dict[str, str]]:
         """调用 MoviePilot 完整媒体识别，仅生成文件名预览，不触碰文件系统。"""
         cache = self.__dict__.setdefault("_mp_recognition_cache", {})
-        cached = cache.get(str(filename))
+        parsed = MetaInfo(str(filename))
+        cache_key = f"{filename}\x00{self._rename_format_cache_key(parsed)}"
+        cached = cache.get(cache_key)
         if cached is not None:
             return cached[0], dict(cached[1])
-        parsed = MetaInfo(str(filename))
         local_title = str(getattr(parsed, "name", "") or "").strip()
         season_episode = self._normalize_season_episode(
             str(getattr(parsed, "season_episode", "") or "").strip()
@@ -411,7 +425,7 @@ class SubscribeLinkRenamer(_PluginBase):
         local_details["recognized_title"] = target_title
         if len(cache) >= 1024:
             cache.clear()
-        cache[str(filename)] = (renamed, dict(local_details))
+        cache[cache_key] = (renamed, dict(local_details))
         return renamed, local_details
 
     def _native_renamed_filename(self, filename: str) -> str:
@@ -582,13 +596,14 @@ class SubscribeLinkRenamer(_PluginBase):
         self.sync_all()
         return schemas.Response(success=True)
 
-    def test_recognition(self, filename: str = "", apikey: str = "") -> schemas.Response:
+    def test_recognition(self, filename: Optional[str] = None, apikey: str = "") -> schemas.Response:
         """只读预览 MP 识别结果，不创建、移动、复制或删除任何文件。"""
         # 页面调用由 MoviePilot 的 Bearer 中间件负责鉴权，不会把 API Token
         # 作为查询参数传入；仅当外部显式传入 apikey 时校验它。
         if apikey and apikey != settings.API_TOKEN:
             return schemas.Response(success=False, message="API密钥错误")
-        value = str(filename or self._test_filename or "").strip()
+        # 显式传入空字符串代表当前表单为空，不得回退到保存的旧测试文件名。
+        value = self._test_filename if filename is None else str(filename).strip()
         if not value:
             return schemas.Response(success=False, message="请输入文件名")
         if len(value) > 512 or any(char in value for char in ("/", "\\", "\x00", "\r", "\n")):
@@ -681,7 +696,7 @@ class SubscribeLinkRenamer(_PluginBase):
                         "text": "开始只读测试",
                         # 通过宿主 API 客户端发起请求，自动携带当前页面的
                         # Bearer 授权；不要使用 href，否则新标签页会丢失授权。
-                        "onclick": "function(e) { var input = document.querySelector('#subscribelinkrenamer-test-filename input') || document.getElementById('subscribelinkrenamer-test-filename'); var filename = input && typeof input.value === 'string' ? input.value.trim() : ''; if (!filename) { alert('请输入文件名'); return } window.MoviePilotAPI.get('plugin/SubscribeLinkRenamer/test_recognition', {filename: filename}).then(function(r) { if (r && r.success === false) { alert(r.message || '识别失败') } else { alert((r && r.message) || JSON.stringify(r)) } }).catch(function(err) { console.error(err); alert('识别请求失败') }) }",
+                        "onclick": "function(e) { var input = document.querySelector('input#subscribelinkrenamer-test-filename') || document.querySelector('#subscribelinkrenamer-test-filename input') || document.querySelector('input[name=subscribelinkrenamer-test-filename]'); var filename = input && typeof input.value === 'string' ? input.value.trim() : ''; if (!filename) { alert('请输入文件名'); return } window.MoviePilotAPI.get('plugin/SubscribeLinkRenamer/test_recognition', {filename: filename}).then(function(r) { if (r && r.success === false) { alert(r.message || '识别失败') } else { alert((r && r.message) || JSON.stringify(r)) } }).catch(function(err) { console.error(err); alert('识别请求失败') }) }",
                     },
                 }]}]},
                 {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{
