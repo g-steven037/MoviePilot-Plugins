@@ -433,14 +433,17 @@ def test_scheduled_empty_cleanup_never_deletes_roots_or_nonempty_dirs(tmp_path: 
         assert outside.exists()
 
     services = plugin.get_service()
-    assert services and len(services) == 2
+    # Normal failures and exhausted files use separate schedules; optional
+    # empty-directory cleanup adds the third service when enabled.
+    assert services and len(services) == 3
     assert any(item["id"] == "P115RapidRetry_empty_cleanup" for item in services)
+    assert any(item["id"] == "P115RapidRetry_exhausted_retry" for item in services)
     form, defaults = plugin.get_form()
     assert "VTextarea" in str(form)
     assert "/path/to/cleanup-root-1\\n/path/to/cleanup-root-2" in str(form)
     assert defaults["empty_cleanup_root"] == ""
     assert defaults["delete_exhausted_enabled"] is False
-    assert "重试耗尽后删除文件及空文件夹" in str(form)
+    assert "重试耗尽处理" in str(form)
 
 
 def test_manual_rapid_and_retry_actions_use_the_worker_queue():
@@ -466,8 +469,11 @@ def test_manual_rapid_and_retry_actions_use_the_worker_queue():
 
     assert calls == [("retry", True), ("rapid", True)]
     form, defaults = plugin.get_form()
-    assert "立即运行秒传一次" in str(form)
-    assert "立即重试秒传一次" in str(form)
+    # One-shot controls were removed from the panel; scheduling is configured
+    # through the normal and exhausted-file Cron fields instead.
+    assert "立即运行秒传一次" not in str(form)
+    assert "立即重试秒传一次" not in str(form)
+    assert "重试耗尽文件独立 Cron" in str(form)
     assert defaults["run_rapid_once"] is False
     assert defaults["run_retry_once"] is False
 
