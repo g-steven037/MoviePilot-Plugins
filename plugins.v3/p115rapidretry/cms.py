@@ -9,6 +9,17 @@ from urllib.request import Request, urlopen
 
 DEFAULT_CMS_TIMEOUT = 30
 CMS_ENDPOINT = "/api/sync/lift_by_token"
+MIN_CMS_DELAY = 60
+MAX_CMS_DELAY = 3600
+
+
+def normalise_cms_delay(value: Any) -> int:
+    """Keep the CMS quiet window compatible with the original CMS plugin."""
+    try:
+        delay = int(value)
+    except (TypeError, ValueError):
+        delay = MIN_CMS_DELAY
+    return min(max(delay, MIN_CMS_DELAY), MAX_CMS_DELAY)
 
 
 def _normalise_domain(value: str) -> str:
@@ -68,7 +79,7 @@ class CmsClient:
             request = Request(
                 self.request_url,
                 method="GET",
-                headers={"User-Agent": "MoviePilot-P115RapidRetry/2.1.0"},
+                headers={"User-Agent": "MoviePilot-P115RapidRetry/2.2.3"},
             )
             stage = "open"
             with self._opener(request, timeout=self.timeout) as response:
