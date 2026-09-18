@@ -143,7 +143,7 @@ class SubscribeLinkRenamer(_PluginBase):
     plugin_name = "识别词硬链接"
     plugin_desc = "基于实时硬链接，将订阅识别词或 MoviePilot 只读识别结果应用到目标文件名；识别失败时保持原名。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/subscribe-assistant.svg"
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "subscribelinkrenamer_"
@@ -483,11 +483,12 @@ class SubscribeLinkRenamer(_PluginBase):
             "path": "/test_recognition",
             "endpoint": self.test_recognition,
             "methods": ["GET"],
+            "auth": "bear",
             "summary": "只读测试 MoviePilot 媒体识别",
         }]
 
     def sync(self, apikey: str) -> schemas.Response:
-        if apikey != settings.API_TOKEN:
+        if apikey and apikey != settings.API_TOKEN:
             return schemas.Response(success=False, message="API密钥错误")
         self.sync_all()
         return schemas.Response(success=True)
@@ -515,7 +516,12 @@ class SubscribeLinkRenamer(_PluginBase):
                 "rename_status": "MP_NATIVE_RECOGNIZED" if target != value else "NO_MATCH",
                 "file_operation": "none",
             }
-            return schemas.Response(success=True, data=data)
+            message = (
+                f"MP识别成功：标题={data['title'] or '未识别'} | "
+                f"季集={data['season_episode'] or '未识别'} | "
+                f"预计名称={data['target_filename']} | 仅预览，未操作文件"
+            )
+            return schemas.Response(success=True, message=message, data=data)
         except Exception as exc:
             logger.warning(f"#识别词硬链接# 只读识别测试失败 | 代码={type(exc).__name__.upper()}")
             return schemas.Response(success=False, message="MP识别失败")
@@ -566,15 +572,26 @@ class SubscribeLinkRenamer(_PluginBase):
                             "model": "test_filename",
                             "label": "只读识别测试文件名",
                             "placeholder": "例如：Kimi.ga.Shinu.made.Koi.wo.Shitai.S01E11.2026.1080p.mp4",
-                            "hint": "保存后调用 /api/v1/plugin/SubscribeLinkRenamer/test_recognition?filename=...&apikey=...；只返回预览，不操作文件。",
+                            "hint": "输入文件名后点击下方按钮，在新标签页查看识别结果；只返回预览，不操作文件。",
                             "persistentHint": True,
                         },
                     }]},
                 ]},
+                {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{
+                    "component": "VBtn", "props": {
+                        "color": "primary",
+                        "variant": "tonal",
+                        "block": True,
+                        "text": "开始只读测试（打开结果）",
+                        "href": "/api/v1/plugin/SubscribeLinkRenamer/test_recognition?filename={{ test_filename }}",
+                        "target": "_blank",
+                        "rel": "noopener",
+                    },
+                }]}]},
                 {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{
                     "component": "VAlert", "props": {
                         "type": "info", "variant": "tonal", "density": "compact",
-                        "text": "只读识别测试：不会创建硬链接、移动、复制、删除或整理文件。",
+                        "text": "点击按钮后会在新标签页显示 JSON 识别结果；不会创建硬链接、移动、复制、删除或整理文件。",
                     },
                 }]}]},
                 {"component": "VRow", "content": [
