@@ -137,7 +137,7 @@ def test_v3_matching_does_not_use_bare_legacy_ids_when_media_pairs_differ():
 
 def test_v3_link_renamer_imports_with_sdk_contract():
     module = _load_renamer_v3()
-    assert module.SubscribeLinkRenamer.plugin_version == "1.1.4"
+    assert module.SubscribeLinkRenamer.plugin_version == "1.1.5"
 
 
 def test_v3_native_recognition_is_filename_only_and_has_no_file_side_effects():
@@ -204,6 +204,64 @@ def test_v3_complete_media_recognition_uses_moviepilot_title_without_file_io():
     assert target == "与你相恋到生命尽头 S01E11.mp4"
     assert details["recognized_title"] == "与你相恋到生命尽头"
     assert details["media_id"] == "285574"
+
+
+def test_v3_complete_media_recognition_uses_moviepilot_standard_naming_template():
+    module = _load_renamer_v3()
+    chain_package = types.ModuleType("app.chain")
+    chain_package.__path__ = []
+    chain_media = types.ModuleType("app.chain.media")
+
+    class FakeMediaChain:
+        def recognize_by_meta(self, meta, **kwargs):
+            assert kwargs["obtain_images"] is False
+            return types.SimpleNamespace(
+                title="与你相恋到生命尽头",
+                media_source="tmdb",
+                media_id="285574",
+                type="电视剧",
+            )
+
+    chain_media.MediaChain = FakeMediaChain
+    sys.modules["app.chain"] = chain_package
+    sys.modules["app.chain.media"] = chain_media
+
+    filemanager_package = types.ModuleType("app.modules")
+    filemanager_package.__path__ = []
+    filemanager_module_package = types.ModuleType("app.modules.filemanager")
+    filemanager_module_package.__path__ = []
+    filemanager_module = types.ModuleType("app.modules.filemanager.module")
+
+    class FakeFileManagerModule:
+        @staticmethod
+        def recommend_name(meta, mediainfo, episodes_info=None):
+            assert meta is not None
+            assert mediainfo.title == "与你相恋到生命尽头"
+            assert episodes_info is None
+            return (
+                "/media/与你相恋到生命尽头/Season 01/"
+                "与你相恋到生命尽头 S01E11 2026 1080p Baha WEB-DL x264 AAC-ADWeb.mp4"
+            )
+
+    filemanager_module.FileManagerModule = FakeFileManagerModule
+    sys.modules["app.modules"] = filemanager_package
+    sys.modules["app.modules.filemanager"] = filemanager_module_package
+    sys.modules["app.modules.filemanager.module"] = filemanager_module
+
+    class ParsedMeta:
+        name = "Kimi Ga Shinu Made Koi Wo Shitai"
+        title = "Kimi.ga.Shinu.made.Koi.wo.Shitai.S01E11.2026.1080p.Baha.WEB-DL.x264.AAC-ADWeb.mp4"
+        season_episode = "S01 E11"
+        type = "电视剧"
+
+    module.MetaInfo = lambda title: ParsedMeta()
+    plugin = module.SubscribeLinkRenamer()
+    target, details = plugin._complete_media_renamed_filename(ParsedMeta.title)
+
+    assert target == (
+        "与你相恋到生命尽头 S01E11 2026 1080p Baha WEB-DL x264 AAC-ADWeb.mp4"
+    )
+    assert details["naming_mode"] == "MOVIEPILOT_STANDARD"
 
 
 def test_v3_complete_media_recognition_caches_same_filename():
@@ -292,4 +350,6 @@ def test_v3_form_exposes_read_only_recognition_button():
     assert "VBtn" in serialized
     assert "开始只读测试" in serialized
     assert "window.MoviePilotAPI.get('plugin/SubscribeLinkRenamer/test_recognition'" in serialized
+    assert "subscribelinkrenamer-test-filename" in serialized
+    assert "model.test_filename" not in serialized
     assert "href" not in serialized
