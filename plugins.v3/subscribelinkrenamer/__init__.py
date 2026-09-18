@@ -14,6 +14,7 @@ from watchfiles import Change, watch
 from app import schemas
 from app.sdk.config import settings
 from app.sdk.events import Event, eventmanager
+from app.sdk.media import MetaInfo
 from app.sdk.media import WordsMatcher
 from app.db.oper.subscribe import SubscribeOper
 from app.sdk.logging import logger
@@ -140,9 +141,9 @@ class FileMonitorHandler:
 
 class SubscribeLinkRenamer(_PluginBase):
     plugin_name = "识别词硬链接"
-    plugin_desc = "基于实时硬链接，将订阅自定义识别词应用到目标文件名；未命中时保持原名。"
+    plugin_desc = "基于实时硬链接，将订阅识别词或 MoviePilot 只读识别结果应用到目标文件名；识别失败时保持原名。"
     plugin_icon = "https://raw.githubusercontent.com/g-steven037/MoviePilot-Plugins/main/assets/subscribe-assistant.svg"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.1"
     plugin_author = "g-steven037"
     author_url = "https://github.com/g-steven037"
     plugin_config_prefix = "subscribelinkrenamer_"
@@ -160,6 +161,8 @@ class SubscribeLinkRenamer(_PluginBase):
     _exclude_keywords = ""
     _cron = ""
     _size = 0.0
+    _use_mp_recognition = False
+    _test_filename = ""
     _dirconf: Dict[str, Path] = {}
     _subscription_words: Optional[List[Tuple[int, List[str]]]] = None
     _event = threading.Event()
@@ -174,6 +177,8 @@ class SubscribeLinkRenamer(_PluginBase):
         self._monitor_dirs = str(config.get("monitor_dirs", "") or "")
         self._exclude_keywords = str(config.get("exclude_keywords", "") or "")
         self._cron = str(config.get("cron", "") or "").strip()
+        self._use_mp_recognition = bool(config.get("use_mp_recognition", False))
+        self._test_filename = str(config.get("test_filename", "") or "").strip()
         try:
             self._size = self._parse_size(config.get("size", 0))
         except ValueError as exc:
@@ -302,6 +307,44 @@ class SubscribeLinkRenamer(_PluginBase):
         self._subscription_words = words
         return words
 
+    @staticmethod
+    def _safe_native_filename(value: str, suffix: str) -> str:
+        """清理 MP 识别结果，只生成单个文件名，不访问文件系统。"""
+        value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", str(value or ""))
+        value = re.sub(r"\s+", " ", value).strip(" .")
+        if not value:
+            return ""
+        suffix = str(suffix or "")
+        return f"{value}{suffix}"
+
+    def _native_renamed_filename(self, filename: str) -> str:
+        """调用 MP 纯文本识别器；此方法不得传入路径或执行文件操作。"""
+        try:
+            parsed = MetaInfo(str(filename))
+            name = str(getattr(parsed, "name", "") or "").strip()
+            season_episode = str(getattr(parsed, "season_episode", "") or "").strip()
+            if not name:
+                return filename
+            parts = [name]
+            if season_episode:
+                parts.append(season_episode)
+            renamed = self._safe_native_filename(" ".join(parts), Path(filename).suffix)
+            if not renamed or renamed == filename or Path(renamed).name != renamed:
+                return filename
+            return renamed
+        except Exception as exc:
+            logger.debug(f"#识别词硬链接# MP只读识别失败 | 文件={filename} | 代码={type(exc).__name__.upper()}")
+            return filename
+
+    @staticmethod
+    def _rename_status_label(rename_status: str, subscribe_id: int) -> str:
+        """将重命名来源转换为日志标签，避免 MP 识别被误报为未命中。"""
+        if rename_status == "MP_NATIVE_RECOGNIZED":
+            return "MP原生识别"
+        if subscribe_id:
+            return f"订阅ID {subscribe_id}"
+        return "未命中，保持原名"
+
     def _renamed_filename(self, filename: str) -> Tuple[str, int, str]:
         results: Dict[str, int] = {}
         for subscribe_id, words in self._load_subscription_words():
@@ -309,6 +352,10 @@ class SubscribeLinkRenamer(_PluginBase):
             if applied and prepared != filename:
                 results.setdefault(prepared, subscribe_id)
         if not results:
+            if self._use_mp_recognition:
+                native_name = self._native_renamed_filename(filename)
+                if native_name != filename:
+                    return native_name, 0, "MP_NATIVE_RECOGNIZED"
             return filename, 0, "NO_CUSTOM_WORD_MATCH"
         if len(results) > 1:
             return filename, 0, "AMBIGUOUS_CUSTOM_WORDS"
@@ -394,7 +441,7 @@ class SubscribeLinkRenamer(_PluginBase):
                 logger.info(
                     f"#识别词硬链接# {'复制' if transfer_type == 'copy' else '硬链接'}成功 | "
                     f"源文件={file_path.name} | 目标文件={destination.name} | "
-                    f"识别词={'订阅ID ' + str(subscribe_id) if subscribe_id else '未命中，保持原名'}"
+                    f"重命名来源={self._rename_status_label(rename_status, subscribe_id)}"
                 )
                 if self._notify:
                     self.post_message(
@@ -432,6 +479,11 @@ class SubscribeLinkRenamer(_PluginBase):
             "endpoint": self.sync,
             "methods": ["GET"],
             "summary": "订阅识别词实时硬链接",
+        }, {
+            "path": "/test_recognition",
+            "endpoint": self.test_recognition,
+            "methods": ["GET"],
+            "summary": "只读测试 MoviePilot 媒体识别",
         }]
 
     def sync(self, apikey: str) -> schemas.Response:
@@ -439,6 +491,34 @@ class SubscribeLinkRenamer(_PluginBase):
             return schemas.Response(success=False, message="API密钥错误")
         self.sync_all()
         return schemas.Response(success=True)
+
+    def test_recognition(self, filename: str = "", apikey: str = "") -> schemas.Response:
+        """只读预览 MP 识别结果，不创建、移动、复制或删除任何文件。"""
+        if apikey != settings.API_TOKEN:
+            return schemas.Response(success=False, message="API密钥错误")
+        value = str(filename or self._test_filename or "").strip()
+        if not value:
+            return schemas.Response(success=False, message="请输入文件名")
+        if len(value) > 512 or any(char in value for char in ("/", "\\", "\x00", "\r", "\n")):
+            return schemas.Response(success=False, message="测试内容必须是单个文件名，不能包含路径")
+        try:
+            parsed = MetaInfo(value)
+            target = self._native_renamed_filename(value)
+            media_type = getattr(parsed, "type", "")
+            media_type = getattr(media_type, "value", media_type) or ""
+            data = {
+                "source_filename": value,
+                "target_filename": target,
+                "title": str(getattr(parsed, "name", "") or ""),
+                "season_episode": str(getattr(parsed, "season_episode", "") or ""),
+                "media_type": str(media_type),
+                "rename_status": "MP_NATIVE_RECOGNIZED" if target != value else "NO_MATCH",
+                "file_operation": "none",
+            }
+            return schemas.Response(success=True, data=data)
+        except Exception as exc:
+            logger.warning(f"#识别词硬链接# 只读识别测试失败 | 代码={type(exc).__name__.upper()}")
+            return schemas.Response(success=False, message="MP识别失败")
 
     def get_service(self) -> List[Dict[str, Any]]:
         if self._enabled and self._cron:
@@ -466,6 +546,37 @@ class SubscribeLinkRenamer(_PluginBase):
                         "component": "VSwitch", "props": {"model": "onlyonce", "label": "立即运行一次"},
                     }]},
                 ]},
+                {"component": "VRow", "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{
+                        "component": "VSwitch", "props": {
+                            "model": "use_mp_recognition",
+                            "label": "MP 原生识别兜底重命名",
+                        },
+                    }]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{
+                        "component": "VAlert", "props": {
+                            "type": "info", "variant": "tonal", "density": "compact",
+                            "text": "仅将文件名字符串交给 MP 识别；不会移动、复制、整理或刮削源文件。",
+                        },
+                    }]},
+                ]},
+                {"component": "VRow", "content": [
+                    {"component": "VCol", "props": {"cols": 12}, "content": [{
+                        "component": "VTextField", "props": {
+                            "model": "test_filename",
+                            "label": "只读识别测试文件名",
+                            "placeholder": "例如：Kimi.ga.Shinu.made.Koi.wo.Shitai.S01E11.2026.1080p.mp4",
+                            "hint": "保存后调用 /api/v1/plugin/SubscribeLinkRenamer/test_recognition?filename=...&apikey=...；只返回预览，不操作文件。",
+                            "persistentHint": True,
+                        },
+                    }]},
+                ]},
+                {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{
+                    "component": "VAlert", "props": {
+                        "type": "info", "variant": "tonal", "density": "compact",
+                        "text": "只读识别测试：不会创建硬链接、移动、复制、删除或整理文件。",
+                    },
+                }]}]},
                 {"component": "VRow", "content": [
                     {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{
                         "component": "VSelect", "props": {
@@ -502,7 +613,7 @@ class SubscribeLinkRenamer(_PluginBase):
                 {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{
                     "component": "VAlert", "props": {
                         "type": "info", "variant": "tonal",
-                        "text": "核心目录监控与官方“实时硬链接”一致。目标文件名会依次尝试现有订阅中的自定义识别词；唯一命中时重命名，没有命中时保持原名，多个订阅产生不同结果时也保持原名。插件不会新增、修改或删除订阅。小于最小硬链接大小的文件按官方逻辑复制。",
+                        "text": "目标文件名优先尝试订阅自定义识别词；开启 MP 兜底后，仅对文件名字符串进行只读识别。识别失败或有歧义时保持原名。插件不会调用整理链，也不会修改源文件；小于最小硬链接大小的文件仍按官方逻辑复制到目标目录。",
                     },
                 }]}]},
             ],
@@ -515,6 +626,8 @@ class SubscribeLinkRenamer(_PluginBase):
             "exclude_keywords": "",
             "cron": "",
             "size": "",
+            "use_mp_recognition": False,
+            "test_filename": "",
         }
 
     def get_page(self) -> List[dict]:
