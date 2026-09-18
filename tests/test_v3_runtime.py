@@ -27,6 +27,7 @@ def _load_variety_v3():
                                                error=lambda *_a, **_k: None)
     sdk_media = types.ModuleType("app.sdk.media")
     sdk_media.WordsMatcher = type("WordsMatcher", (), {})
+    sdk_media.MetaInfo = type("MetaInfo", (), {})
     sdk_utilities = types.ModuleType("app.sdk.utilities")
     sdk_utilities.SystemUtils = type("SystemUtils", (), {})
     db_oper = types.ModuleType("app.db.oper")
@@ -134,4 +135,66 @@ def test_v3_matching_does_not_use_bare_legacy_ids_when_media_pairs_differ():
 
 def test_v3_link_renamer_imports_with_sdk_contract():
     module = _load_renamer_v3()
-    assert module.SubscribeLinkRenamer.plugin_version == "1.0.0"
+    assert module.SubscribeLinkRenamer.plugin_version == "1.1.1"
+
+
+def test_v3_native_recognition_is_filename_only_and_has_no_file_side_effects():
+    module = _load_renamer_v3()
+    calls = []
+
+    class ParsedMeta:
+        name = "斗罗大陆Ⅱ绝世唐门"
+        season_episode = "S01 E160"
+
+    def readonly_recognizer(title, **kwargs):
+        assert isinstance(title, str)
+        assert "custom_words" not in kwargs
+        calls.append(title)
+        return ParsedMeta()
+
+    module.MetaInfo = readonly_recognizer
+    plugin = module.SubscribeLinkRenamer()
+    plugin._use_mp_recognition = True
+
+    result = plugin._native_renamed_filename(
+        "Soul.Land.S02E160.2023.2160p.WEB-DL.H265.AAC-ADWeb.mp4"
+    )
+
+    assert result == "斗罗大陆Ⅱ绝世唐门 S01 E160.mp4"
+    assert calls == ["Soul.Land.S02E160.2023.2160p.WEB-DL.H265.AAC-ADWeb.mp4"]
+
+
+def test_v3_native_recognition_status_has_explicit_log_label():
+    module = _load_renamer_v3()
+    assert module.SubscribeLinkRenamer._rename_status_label("MP_NATIVE_RECOGNIZED", 0) == "MP原生识别"
+
+
+def test_v3_recognition_test_api_returns_read_only_preview():
+    module = _load_renamer_v3()
+    module.settings.API_TOKEN = "test-token"
+    plugin = module.SubscribeLinkRenamer()
+
+    class ParsedMeta:
+        name = "Kimi Ga Shinu Made Koi Wo Shitai"
+        season_episode = "S01 E11"
+        type = "电视剧"
+
+    module.MetaInfo = lambda title: ParsedMeta()
+    response = plugin.test_recognition(
+        filename="Kimi.ga.Shinu.made.Koi.wo.Shitai.S01E11.2026.1080p.mp4",
+        apikey="test-token",
+    )
+
+    assert response.success is True
+    assert response.data["target_filename"] == "Kimi Ga Shinu Made Koi Wo Shitai S01 E11.mp4"
+    assert response.data["file_operation"] == "none"
+
+
+def test_v3_form_exposes_read_only_recognition_test_input():
+    module = _load_renamer_v3()
+    plugin = module.SubscribeLinkRenamer()
+    form, defaults = plugin.get_form()
+    serialized = repr(form)
+    assert "test_filename" in serialized
+    assert "只读识别测试" in serialized
+    assert defaults["test_filename"] == ""
