@@ -96,6 +96,8 @@ def _load_variety_v3():
 def _load_renamer_v3():
     sys.modules.pop("app.chain.media", None)
     sys.modules.pop("app.chain", None)
+    sys.modules.pop("app.runtime.settings", None)
+    sys.modules.pop("app.runtime", None)
     _load_variety_v3()
     path = ROOT / "plugins.v3/subscribelinkrenamer/__init__.py"
     spec = importlib.util.spec_from_file_location("renamer_v3_test", path)
@@ -137,7 +139,7 @@ def test_v3_matching_does_not_use_bare_legacy_ids_when_media_pairs_differ():
 
 def test_v3_link_renamer_imports_with_sdk_contract():
     module = _load_renamer_v3()
-    assert module.SubscribeLinkRenamer.plugin_version == "1.1.5"
+    assert module.SubscribeLinkRenamer.plugin_version == "1.1.6"
 
 
 def test_v3_native_recognition_is_filename_only_and_has_no_file_side_effects():
@@ -295,6 +297,67 @@ def test_v3_complete_media_recognition_caches_same_filename():
     assert len(calls) == 1
 
 
+def test_v3_recognition_cache_invalidates_when_moviepilot_rename_format_changes():
+    module = _load_renamer_v3()
+    chain_package = types.ModuleType("app.chain")
+    chain_package.__path__ = []
+    chain_media = types.ModuleType("app.chain.media")
+    filemanager_package = types.ModuleType("app.modules")
+    filemanager_package.__path__ = []
+    filemanager_module_package = types.ModuleType("app.modules.filemanager")
+    filemanager_module_package.__path__ = []
+    filemanager_module = types.ModuleType("app.modules.filemanager.module")
+    runtime_package = types.ModuleType("app.runtime")
+    runtime_package.__path__ = []
+    runtime_settings = types.ModuleType("app.runtime.settings")
+    current_format = ["format-a"]
+    recognize_calls = []
+
+    class FakeMediaChain:
+        def recognize_by_meta(self, meta, **kwargs):
+            recognize_calls.append(meta)
+            return types.SimpleNamespace(
+                title="缓存标题",
+                media_source="tmdb",
+                media_id="1",
+                type="电视剧",
+            )
+
+    class FakeFileManagerModule:
+        @staticmethod
+        def recommend_name(meta, mediainfo, episodes_info=None):
+            return f"/media/{current_format[0]}.mp4"
+
+    runtime_settings.get_runtime_setting = lambda key: (
+        (lambda _media_type: current_format[0]) if key == "RENAME_FORMAT" else None
+    )
+    chain_media.MediaChain = FakeMediaChain
+    filemanager_module.FileManagerModule = FakeFileManagerModule
+    sys.modules["app.chain"] = chain_package
+    sys.modules["app.chain.media"] = chain_media
+    sys.modules["app.modules"] = filemanager_package
+    sys.modules["app.modules.filemanager"] = filemanager_module_package
+    sys.modules["app.modules.filemanager.module"] = filemanager_module
+    sys.modules["app.runtime"] = runtime_package
+    sys.modules["app.runtime.settings"] = runtime_settings
+
+    class ParsedMeta:
+        name = "Cache Title"
+        title = "Cache.Title.S01E01.mp4"
+        season_episode = "S01 E01"
+        type = "电视剧"
+
+    module.MetaInfo = lambda title: ParsedMeta()
+    plugin = module.SubscribeLinkRenamer()
+    first, _ = plugin._complete_media_renamed_filename(ParsedMeta.title)
+    current_format[0] = "format-b"
+    second, _ = plugin._complete_media_renamed_filename(ParsedMeta.title)
+
+    assert first == "format-a.mp4"
+    assert second == "format-b.mp4"
+    assert len(recognize_calls) == 2
+
+
 def test_v3_recognition_test_api_returns_read_only_preview():
     module = _load_renamer_v3()
     module.settings.API_TOKEN = "test-token"
@@ -332,6 +395,18 @@ def test_v3_recognition_test_api_accepts_page_bearer_without_query_token():
     assert response.data["file_operation"] == "none"
 
 
+def test_v3_recognition_test_api_does_not_fallback_to_saved_filename_for_explicit_empty_value():
+    module = _load_renamer_v3()
+    module.settings.API_TOKEN = "test-token"
+    plugin = module.SubscribeLinkRenamer()
+    plugin._test_filename = "Saved.Old.Title.S01E01.mp4"
+
+    response = plugin.test_recognition(filename="", apikey="test-token")
+
+    assert response.success is False
+    assert response.message == "请输入文件名"
+
+
 def test_v3_form_exposes_read_only_recognition_test_input():
     module = _load_renamer_v3()
     plugin = module.SubscribeLinkRenamer()
@@ -351,5 +426,6 @@ def test_v3_form_exposes_read_only_recognition_button():
     assert "开始只读测试" in serialized
     assert "window.MoviePilotAPI.get('plugin/SubscribeLinkRenamer/test_recognition'" in serialized
     assert "subscribelinkrenamer-test-filename" in serialized
+    assert "input#subscribelinkrenamer-test-filename" in serialized
     assert "model.test_filename" not in serialized
     assert "href" not in serialized
