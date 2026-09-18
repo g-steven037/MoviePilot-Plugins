@@ -94,6 +94,8 @@ def _load_variety_v3():
 
 
 def _load_renamer_v3():
+    sys.modules.pop("app.chain.media", None)
+    sys.modules.pop("app.chain", None)
     _load_variety_v3()
     path = ROOT / "plugins.v3/subscribelinkrenamer/__init__.py"
     spec = importlib.util.spec_from_file_location("renamer_v3_test", path)
@@ -135,7 +137,7 @@ def test_v3_matching_does_not_use_bare_legacy_ids_when_media_pairs_differ():
 
 def test_v3_link_renamer_imports_with_sdk_contract():
     module = _load_renamer_v3()
-    assert module.SubscribeLinkRenamer.plugin_version == "1.1.3"
+    assert module.SubscribeLinkRenamer.plugin_version == "1.1.4"
 
 
 def test_v3_native_recognition_is_filename_only_and_has_no_file_side_effects():
@@ -160,13 +162,79 @@ def test_v3_native_recognition_is_filename_only_and_has_no_file_side_effects():
         "Soul.Land.S02E160.2023.2160p.WEB-DL.H265.AAC-ADWeb.mp4"
     )
 
-    assert result == "斗罗大陆Ⅱ绝世唐门 S01 E160.mp4"
+    assert result == "斗罗大陆Ⅱ绝世唐门 S01E160.mp4"
     assert calls == ["Soul.Land.S02E160.2023.2160p.WEB-DL.H265.AAC-ADWeb.mp4"]
 
 
 def test_v3_native_recognition_status_has_explicit_log_label():
     module = _load_renamer_v3()
     assert module.SubscribeLinkRenamer._rename_status_label("MP_NATIVE_RECOGNIZED", 0) == "MP原生识别"
+
+
+def test_v3_complete_media_recognition_uses_moviepilot_title_without_file_io():
+    module = _load_renamer_v3()
+    chain_package = types.ModuleType("app.chain")
+    chain_package.__path__ = []
+    chain_media = types.ModuleType("app.chain.media")
+
+    class FakeMediaChain:
+        def recognize_by_meta(self, meta, **kwargs):
+            assert kwargs["obtain_images"] is False
+            return types.SimpleNamespace(
+                title="与你相恋到生命尽头",
+                media_source="tmdb",
+                media_id="285574",
+            )
+
+    chain_media.MediaChain = FakeMediaChain
+    sys.modules["app.chain"] = chain_package
+    sys.modules["app.chain.media"] = chain_media
+
+    class ParsedMeta:
+        name = "Kimi Ga Shinu Made Koi Wo Shitai"
+        season_episode = "S01 E11"
+        type = "电视剧"
+
+    module.MetaInfo = lambda title: ParsedMeta()
+    plugin = module.SubscribeLinkRenamer()
+    target, details = plugin._complete_media_renamed_filename(
+        "Kimi.ga.Shinu.made.Koi.wo.Shitai.S01E11.2026.1080p.mp4"
+    )
+
+    assert target == "与你相恋到生命尽头 S01E11.mp4"
+    assert details["recognized_title"] == "与你相恋到生命尽头"
+    assert details["media_id"] == "285574"
+
+
+def test_v3_complete_media_recognition_caches_same_filename():
+    module = _load_renamer_v3()
+    chain_package = types.ModuleType("app.chain")
+    chain_package.__path__ = []
+    chain_media = types.ModuleType("app.chain.media")
+    calls = []
+
+    class FakeMediaChain:
+        def recognize_by_meta(self, meta, **kwargs):
+            calls.append(meta)
+            return types.SimpleNamespace(title="缓存标题", media_source="tmdb", media_id="1")
+
+    chain_media.MediaChain = FakeMediaChain
+    sys.modules["app.chain"] = chain_package
+    sys.modules["app.chain.media"] = chain_media
+
+    class ParsedMeta:
+        name = "Cache Title"
+        season_episode = "S01 E01"
+        type = "电视剧"
+
+    module.MetaInfo = lambda title: ParsedMeta()
+    plugin = module.SubscribeLinkRenamer()
+    filename = "Cache.Title.S01E01.mp4"
+    first = plugin._complete_media_renamed_filename(filename)
+    second = plugin._complete_media_renamed_filename(filename)
+
+    assert first == second
+    assert len(calls) == 1
 
 
 def test_v3_recognition_test_api_returns_read_only_preview():
@@ -186,7 +254,7 @@ def test_v3_recognition_test_api_returns_read_only_preview():
     )
 
     assert response.success is True
-    assert response.data["target_filename"] == "Kimi Ga Shinu Made Koi Wo Shitai S01 E11.mp4"
+    assert response.data["target_filename"] == "Kimi Ga Shinu Made Koi Wo Shitai S01E11.mp4"
     assert response.data["file_operation"] == "none"
 
 
